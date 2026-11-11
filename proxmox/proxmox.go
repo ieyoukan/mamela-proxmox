@@ -270,7 +270,7 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 	cs := &configs{ctx: ctx, h: h, seen: map[int64]vmConfig{}}
 	for _, r := range in.Resources {
 		if r.Kind == KindTemplate {
-			o, err := observeTemplate(cs, r, vms, mine)
+			o, err := observeTemplate(cs, r, vms, mine, in.Claimed)
 			if err != nil {
 				return out, fmt.Errorf("%s: %w", r.ID, err)
 			}
@@ -320,12 +320,7 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 			}
 		}
 		if !found {
-			st := State{}
-			for id := s.VMIDMin; id <= s.VMIDMax && len(st.FreeVMIDs) < 64; id++ {
-				if _, taken := vms[id]; !taken {
-					st.FreeVMIDs = append(st.FreeVMIDs, id)
-				}
-			}
+			st := State{FreeVMIDs: freeVMIDs(vms, in.Claimed, s.Node, s.VMIDMin, s.VMIDMax, false)}
 			img, ok := Images[s.Image]
 			if !ok {
 				return out, fmt.Errorf("%s: image %q is not one of this provider's (%s)", r.ID, s.Image, strings.Join(slices.Sorted(maps.Keys(Images)), ", "))

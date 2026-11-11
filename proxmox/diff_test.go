@@ -117,3 +117,19 @@ func TestDeleteTemplateWithClonesIsRefused(t *testing.T) {
 		t.Error("a template is rebooted")
 	}
 }
+
+// The VMIDs other plans are to create (Mamela's claims) are taken: plans made one after another
+// and applied together do not choose the same VMID.
+func TestClaimedVMIDsAreTaken(t *testing.T) {
+	vms := map[int64]resource{7000: {VMID: 7000}}
+	claimed := []map[string]string{{"node": "pve1", "vmid": "7001"}, {"node": "pve2", "vmid": "7002"}, {"node": "pve1", "vmid": "7009", "newid": "7009"}}
+	if got := freeVMIDs(vms, claimed, "pve1", 7000, 7009, false); !slices.Equal(got[:3], []int64{7002, 7003, 7004}) {
+		t.Errorf("from the bottom: %v", got)
+	}
+	if got := freeVMIDs(vms, claimed, "pve1", 7000, 7009, true); got[0] != 7008 {
+		t.Errorf("from the top: %v", got)
+	}
+	if got := freeVMIDs(vms, nil, "pve1", 7000, 7001, false); !slices.Equal(got, []int64{7001}) {
+		t.Errorf("no claims: %v", got)
+	}
+}

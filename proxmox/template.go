@@ -130,7 +130,7 @@ func (c *configs) of(node string, vmid int64) (vmConfig, error) {
 }
 
 // observeTemplate finds a declared template, or tells what creating it needs.
-func observeTemplate(cs *configs, r protocol.Resource, vms map[int64]resource, mine map[int64]bool) (protocol.Observed, error) {
+func observeTemplate(cs *configs, r protocol.Resource, vms map[int64]resource, mine map[int64]bool, claimed []map[string]string) (protocol.Observed, error) {
 	s, err := templateSpec(r)
 	if err != nil {
 		return protocol.Observed{}, err
@@ -150,12 +150,7 @@ func observeTemplate(cs *configs, r protocol.Resource, vms map[int64]resource, m
 			return o, fillTemplate(cs, &o, vm, cfg, m, s.Tag, vms)
 		}
 	}
-	st := TemplateState{}
-	for id := s.VMIDMax; id >= s.VMIDMin && len(st.FreeVMIDs) < 64; id-- {
-		if _, taken := vms[id]; !taken {
-			st.FreeVMIDs = append(st.FreeVMIDs, id)
-		}
-	}
+	st := TemplateState{FreeVMIDs: freeVMIDs(vms, claimed, s.Node, s.VMIDMin, s.VMIDMax, true)}
 	img := Images[s.Image]
 	var err2 error
 	if st.ImageUploaded, err2 = hasVolume(cs.ctx, cs.h, s.Node, s.ImageStorage, "import", VolumeName(s.Image, img)); err2 != nil {
@@ -291,4 +286,31 @@ func finishClone(r protocol.Resource, s Spec, o protocol.Observed) protocol.Chan
 				"memory": {strconv.FormatInt(s.MemoryMiB, 10)}, "ide2": {s.ImageStorage + ":iso/{artifact:seed.name},media=cdrom"},
 				"digest": {o.Version}}},
 		}}
+}
+
+// freeVMIDs are up to 64 VMIDs of a range that no guest has and that no other plan is to create on
+// the node (Mamela's claims): from the bottom of the range (VMs) or from the top (templates).
+func freeVMIDs(vms map[int64]resource, claimed []map[string]string, node string, min, max int64, fromTop bool) []int64 {
+	taken := map[int64]bool{}
+	for _, ids := range claimed {
+		if ids["node"] != node {
+			continue
+		}
+		for _, k := range []string{"vmid", "newid"} {
+			if n, err := strconv.ParseInt(ids[k], 10, 64); err == nil {
+				taken[n] = true
+			}
+		}
+	}
+	var out []int64
+	for i := int64(0); i <= max-min && len(out) < 64; i++ {
+		id := min + i
+		if fromTop {
+			id = max - i
+		}
+		if _, exists := vms[id]; !exists && !taken[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
