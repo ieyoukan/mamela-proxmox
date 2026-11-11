@@ -1,0 +1,41 @@
+# One VM on Proxmox VE with nginx installed and running. The site's values are fictional: write the
+# real ones in a declaration of your own, outside a public repository.
+#
+# The pool, VMID range, storages and bridge here must also be the guard's boundary
+# ([provider.proxmox.guard] in mamela.providers.toml): the guard refuses a change outside it.
+
+import Std.Console.{SystemConsole}
+import Mamela.{Dhcp}
+import Proxmox.{Site, Vm}
+
+fn infrastructure() -> Mamela.Graph {
+  site = Site(
+    node: "pve1",
+    pool: "mamela",
+    disk_storage: "local-lvm",
+    image_storage: "local",
+    bridge: "vmbr0",
+    tag: "mamela",
+    vmid_min: 7000,
+    vmid_max: 7099,
+  )
+  web = Vm(
+    name: "web",
+    cpu: 1,
+    memory_mib: 1024,
+    disk_gib: 10,
+    image: "ubuntu-24.04",
+    network: Dhcp,
+  )
+
+  Mamela.empty()
+    |> Proxmox.vm(site, web)
+    |> Mamela.package_on(Proxmox.node(web), "nginx")
+    |> Mamela.service_on(Proxmox.node(web), "nginx", True, True)
+}
+
+fn main() {
+  with SystemConsole {
+    infrastructure() |> Mamela.print
+  }
+}

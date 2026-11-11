@@ -12,6 +12,8 @@
 
 プロバイダーはファイルの中身にも Token にも触れません（Mamela の ADR 0002、0004）。
 
+Proxmox の安全装置（guard、明示操作、root 用のスクリプト）もこのプロバイダーにあります。Mamela 本体は、それを汎用の仕組みとして強制します（Mamela の ADR 0006）。共有の本番クラスタで使う手順は [docs/lab.md](docs/lab.md) にあります。
+
 ## できること
 
 | 操作 | 内容 |
@@ -129,10 +131,20 @@ mamela provider script <pome-dir> proxmox cleanup   > cleanup.sh
 - **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
 - **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ消します。
 
+## 例
+
+| 例 | 内容 |
+|---|---|
+| [examples/homelab](examples/homelab/src/main.emel) | VM 1 台と nginx |
+| [examples/k3s](examples/k3s/src/main.emel) | 固定アドレスの k3s（server 1 台、agent 2 台） |
+
+値は架空です。実際の値は、公開しない場所の宣言に書きます。
+
 ## 開発
 
 ```bash
 # Go が要るのは、プロバイダーを開発するときだけ（WASM にビルドし、Mamela の適合試験を通す）
+# 例の確認: (cd examples/k3s && emela check)。依存は emela が Pome.lock どおりに取得する
 ./build.sh                          # pome/provider.wasm と pome/mamela-provider.toml を作り直す
 MAMELA_TOOLCHAIN_DIR=../mamela/.tools/bin go test ./...   # Mamela の適合試験（偽の Proxmox で）
 ```

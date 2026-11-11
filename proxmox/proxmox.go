@@ -356,6 +356,13 @@ func ids(node string, vmid int64) map[string]string {
 	return map[string]string{"node": node, "vmid": strconv.FormatInt(vmid, 10)}
 }
 
+// startReason is the same whether the start comes with the create or the VM is found stopped: after
+// a create whose answer was lost, the approved start is still exactly the change to make (Mamela
+// carries on with an approved plan only while the provider's changes are the same). Starts are
+// late: Mamela runs them after every create of the apply, so that no first boot competes with
+// another VM's disk import.
+const startReason = "start it (after every VM of the run is created)"
+
 // Diff implements sdk.Provider.
 func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.DiffResult, error) {
 	obs := map[string]protocol.Observed{}
@@ -401,7 +408,7 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 			uploading[key] = true
 			out.Changes = append(out.Changes, create(r, s, st, vmid), protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart,
 				IDs: ids(s.Node, vmid), Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}},
-				Reasons: []string{"start it once every VM of the run is created"}})
+				Reasons: []string{startReason}, Late: true})
 		case !o.Owned:
 			continue
 		default:
@@ -436,7 +443,7 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 			}
 			if !st.Running {
 				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart, IDs: id,
-					Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}}, Reasons: []string{"it is stopped"}})
+					Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}}, Reasons: []string{startReason}, Late: true})
 			}
 			// What it never changes is still a difference: reported as a change of an unsupported
 			// operation (nothing to send), which Mamela shows and denies.

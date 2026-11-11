@@ -1,0 +1,14 @@
+[pome]
+name = "github.com/ieyoukan/mamela-proxmox/examples/homelab"
+version = "0.1.0"
+emela = "0.27.0"
+
+[build]
+target = "wasm"
+
+[dependencies]
+"github.com/ieyoukan/mamela/pome/mamela" = "v0.2.0"
+"github.com/ieyoukan/mamela-proxmox/pome" = "v0.1.0"
+
+[replace]
+"github.com/ieyoukan/mamela-proxmox/pome" = { path = "../../pome" }

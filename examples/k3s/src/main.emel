@@ -1,0 +1,58 @@
+# A light Kubernetes cluster on Proxmox VE: a k3s server and two agents, one VM each, with static
+# addresses (fictional: 192.0.2.0/24 is a documentation range). mamelet installs the k3s release
+# pinned below only after approval and only if the binary's sha256 matches; the Control Plane gives
+# the nodes their join token and each agent its server's address. Starting k3s is a separate
+# approval, and an agent starts only once its server runs.
+#
+# The sha256 is the release's, for linux/amd64 (sha256sum-amd64.txt of the release).
+
+import Std.Console.{SystemConsole}
+import Mamela.{Static}
+import Proxmox.{Site, Vm}
+
+const K3S_VERSION = "v1.37.2+k3s1"
+const K3S_SHA256 = "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda"
+
+fn lan(address: String) -> Mamela.Network {
+  Static(address:, gateway: "192.0.2.1", dns: ["192.0.2.1"])
+}
+
+fn vm(name: String, memory_mib: Int, address: String) -> Vm {
+  Vm(name:, cpu: 2, memory_mib:, disk_gib: 20, image: "ubuntu-24.04", network: lan(address))
+}
+
+fn infrastructure() -> Mamela.Graph {
+  site = Site(
+    node: "pve1",
+    pool: "mamela",
+    disk_storage: "local-lvm",
+    image_storage: "local",
+    bridge: "vmbr0",
+    tag: "mamela",
+    vmid_min: 7000,
+    vmid_max: 7099,
+  )
+  server = vm("k3s-server", 2048, "192.0.2.40/24")
+  agent1 = vm("k3s-agent-1", 1536, "192.0.2.41/24")
+  agent2 = vm("k3s-agent-2", 1536, "192.0.2.42/24")
+  s = Proxmox.node(server)
+  a1 = Proxmox.node(agent1)
+  a2 = Proxmox.node(agent2)
+
+  Mamela.empty()
+    |> Proxmox.vm(site, server)
+    |> Proxmox.vm(site, agent1)
+    |> Proxmox.vm(site, agent2)
+    |> Mamela.k3s_server_on(s, K3S_VERSION, K3S_SHA256)
+    |> Mamela.k3s_agent_on(a1, s, K3S_VERSION, K3S_SHA256)
+    |> Mamela.k3s_agent_on(a2, s, K3S_VERSION, K3S_SHA256)
+    |> Mamela.service_on(s, "k3s", True, True)
+    |> Mamela.service_on(a1, "k3s", True, True)
+    |> Mamela.service_on(a2, "k3s", True, True)
+}
+
+fn main() {
+  with SystemConsole {
+    infrastructure() |> Mamela.print
+  }
+}

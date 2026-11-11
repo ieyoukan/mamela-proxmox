@@ -71,3 +71,29 @@ func TestOwnershipNeedsTheTag(t *testing.T) {
 		t.Fatal("an untagged VM is claimed as owned")
 	}
 }
+
+// The start planned with a create is exactly the start of the VM found stopped later (after a
+// create whose answer was lost): Mamela goes on with the approved plan only while the changes are
+// the same. Both are late, so that every create of the apply comes first.
+func TestStartIsTheSameChangeEitherWay(t *testing.T) {
+	spec := []byte(`{` + testSite + `,"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}}`)
+	r := protocol.Resource{ID: "ProxmoxVM web", Kind: Kind, Name: "web", Spec: spec}
+	free, _ := json.Marshal(State{FreeVMIDs: []int64{7001}})
+	created, err := Provider{}.Diff(context.Background(), protocol.DiffParams{Desired: []protocol.Resource{r},
+		Observed: []protocol.Observed{{ID: r.ID, Kind: Kind, Name: "web", State: free}}})
+	if err != nil || len(created.Changes) != 2 {
+		t.Fatalf("%v %v", created.Changes, err)
+	}
+	stopped, _ := json.Marshal(State{CPU: 1, MemoryMiB: 1024, DiskGiB: 10, Image: "ubuntu-24.04", Network: "dhcp", Tagged: true})
+	later, err := Provider{}.Diff(context.Background(), protocol.DiffParams{Desired: []protocol.Resource{r},
+		Observed: []protocol.Observed{{ID: r.ID, Kind: Kind, Name: "web", Exists: true, Owned: true, Version: "d1",
+			IDs: map[string]string{"node": "pve1", "vmid": "7001"}, State: stopped}}})
+	if err != nil || len(later.Changes) != 1 {
+		t.Fatalf("%v %v", later.Changes, err)
+	}
+	a, _ := json.Marshal(created.Changes[1], json.Deterministic(true))
+	b, _ := json.Marshal(later.Changes[0], json.Deterministic(true))
+	if string(a) != string(b) || !later.Changes[0].Late {
+		t.Errorf("the starts differ:\n%s\n%s", a, b)
+	}
+}
