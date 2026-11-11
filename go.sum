@@ -1,0 +1,4 @@
+github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+github.com/ieyoukan/mamela v0.0.0-20261111002829-380e95d4551c h1:r7S6D+U44lQ5qlz0hFiyD2a5+qVz9m8GfTFqoJIyJbg=
+github.com/ieyoukan/mamela v0.0.0-20261111002829-380e95d4551c/go.mod h1:HUiBH2TybsAvwCmxNraI+aLfGnVqVr7uvQzN3rkWrMc=

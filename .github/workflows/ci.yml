@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mamela-proxmox
+      - uses: actions/checkout@v4
+        with:
+          repository: ieyoukan/mamela
+          ref: feat/provider-proxmox-split
+          path: mamela
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mamela-proxmox/go.mod
+      - name: Mamela's pinned toolchain (wasmtime)
+        working-directory: mamela
+        run: go run ./cmd/mamela toolchain install --dir "$PWD/.tools/bin" --downloads "$PWD/.tools/downloads"
+      - name: Test
+        working-directory: mamela-proxmox
+        env:
+          MAMELA_TOOLCHAIN_DIR: ${{ github.workspace }}/mamela/.tools/bin
+        run: go vet ./... && go test ./...
