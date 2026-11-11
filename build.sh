@@ -4,6 +4,14 @@
 # checks that the committed program is exactly this build of the source.
 set -euo pipefail
 cd "$(dirname "$0")"
+# The program must be reproducible: the same source and the same Go give the same bytes (CI checks
+# it). Build with exactly this Go release.
+want_go=go1.27.3
+got_go="$(GOTOOLCHAIN=${GOTOOLCHAIN:-auto} go env GOVERSION)"
+if [[ "$got_go" != "$want_go" ]]; then
+  echo "build with $want_go (this is $got_go): GOTOOLCHAIN=$want_go ./build.sh" >&2
+  exit 1
+fi
 out=pome/provider.wasm
 GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -o "$out" ./cmd/proxmox-provider
 sum="$(shasum -a 256 "$out" | cut -d' ' -f1)"
