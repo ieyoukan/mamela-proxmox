@@ -162,7 +162,7 @@ func (Provider) Manifest() protocol.Manifest {
 	}
 	create := append(pool("VM.Allocate", "VM.Audit", "VM.Config.CPU", "VM.Config.Memory", "VM.Config.Disk", "VM.Config.HWType",
 		"VM.Config.Network", "VM.Config.Options"),
-		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateSpace", "Datastore.AllocateTemplate")...)...)
+		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)...)
 	create = append(create, protocol.Need{Capability: "SDN.Use", Target: protocol.Target{Type: "proxmox-acl", Ref: "/sdn/zones/localnetwork/{bridge}"}, Always: true})
 	reads := []protocol.Call{listVMs, getConfig, getStatus, listContent, getTask}
 	with := func(calls ...protocol.Call) []protocol.Call { return append(slices.Clone(reads), calls...) }

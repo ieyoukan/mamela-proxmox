@@ -40,3 +40,34 @@ func TestNeedsCoverTheCatalog(t *testing.T) {
 		}
 	}
 }
+
+// And no more: every privilege an operation declares is one a call of it needs (the narrowest of
+// Proxmox's alternatives), so the bootstrap grants nothing the provider never uses.
+func TestNeedsAreNoMoreThanTheCatalog(t *testing.T) {
+	m := Provider{}.Manifest()
+	used := func(calls []protocol.Call, n protocol.Need) bool {
+		for _, c := range calls {
+			ps, _ := PrivilegesOf(c)
+			for _, p := range ps {
+				if p.Ref == n.Target.Ref && p.Privs[0] == n.Capability {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, n := range m.Observe {
+		if !used(m.ObserveCalls, n) {
+			t.Errorf("observe declares %s on %s, which no observing call needs", n.Capability, n.Target.Ref)
+		}
+	}
+	for _, k := range m.Kinds {
+		for _, o := range k.Operations {
+			for _, n := range o.Needs {
+				if !used(o.Calls, n) {
+					t.Errorf("%s declares %s on %s, which none of its calls needs", o.Op, n.Capability, n.Target.Ref)
+				}
+			}
+		}
+	}
+}
