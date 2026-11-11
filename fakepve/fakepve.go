@@ -82,6 +82,14 @@ func reply(w http.ResponseWriter, status int, data any) {
 	json.MarshalWrite(w, map[string]any{"data": data}, json.Deterministic(true))
 }
 
+// diskOption writes the size as Proxmox does: in MiB after an import (3.5 GiB), in GiB once resized.
+func diskOption(v *VM) string {
+	if v.DiskGiB == 3 {
+		return fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=3584M", v.VMID)
+	}
+	return fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=%dG", v.VMID, v.DiskGiB)
+}
+
 func upid(node, kind string, vmid int64) string {
 	return fmt.Sprintf("UPID:%s:0000AAAA:0000BBBB:00000000:%s:%d:fake@pve!t:", node, kind, vmid)
 }
@@ -115,7 +123,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("GET /nodes/{node}/qemu/{vmid}/config", func(w http.ResponseWriter, r *http.Request) {
 		if v := vm(w, r); v != nil {
 			cfg := map[string]any{"name": v.Name, "cores": v.Cores, "memory": strconv.FormatInt(v.Memory, 10),
-				"description": v.Description, "digest": v.digest(), "scsi0": fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=%dG", v.VMID, v.DiskGiB)}
+				"description": v.Description, "digest": v.digest(), "scsi0": diskOption(v)}
 			if v.Tags != "" {
 				cfg["tags"] = v.Tags
 			}
@@ -195,7 +203,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cfg[k] = r.PostForm.Get(k)
 		}
 		s.vms[id] = &VM{VMID: id, Name: r.PostForm.Get("name"), Node: r.PathValue("node"), Pool: r.PostForm.Get("pool"),
-			Description: r.PostForm.Get("description"), Cores: cores, Memory: mem, DiskGiB: 4, Config: cfg}
+			Description: r.PostForm.Get("description"), Cores: cores, Memory: mem, DiskGiB: 3, Config: cfg}
 		reply(w, 200, upid(r.PathValue("node"), "qmcreate", id))
 	})
 	changed := func(w http.ResponseWriter, r *http.Request, v *VM) bool {

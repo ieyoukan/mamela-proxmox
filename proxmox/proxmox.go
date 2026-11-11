@@ -686,15 +686,40 @@ func (c *vmConfig) UnmarshalJSON(b []byte) error {
 	if c.Cores == 0 {
 		c.Cores = 1 // the Proxmox default
 	}
-	for _, part := range strings.Split(text("scsi0"), ",") {
-		if v, ok := strings.CutPrefix(part, "size="); ok && strings.HasSuffix(v, "G") {
-			c.DiskGiB, _ = strconv.ParseInt(strings.TrimSuffix(v, "G"), 10, 64)
-		}
-	}
+	c.DiskGiB = diskBytes(text("scsi0")) >> 30
+
 	for _, t := range strings.FieldsFunc(text("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
 		c.Tags = append(c.Tags, t)
 	}
 	return nil
+}
+
+// diskBytes reads size=<n>[KMGT] from a drive option (Proxmox writes 3584M after an import, 10G
+// after a resize).
+func diskBytes(drive string) int64 {
+	for _, part := range strings.Split(drive, ",") {
+		v, ok := strings.CutPrefix(part, "size=")
+		if !ok || v == "" {
+			continue
+		}
+		mult := int64(1)
+		switch v[len(v)-1] {
+		case 'K':
+			mult = 1 << 10
+		case 'M':
+			mult = 1 << 20
+		case 'G':
+			mult = 1 << 30
+		case 'T':
+			mult = 1 << 40
+		}
+		n, err := strconv.ParseInt(strings.TrimRight(v, "KMGT"), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n * mult
+	}
+	return 0
 }
 
 func config(ctx context.Context, h *sdk.Host, node string, vmid int64) (vmConfig, error) {
