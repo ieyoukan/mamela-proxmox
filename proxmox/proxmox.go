@@ -8,8 +8,13 @@
 //
 // Kind ProxmoxVM is a node kind: Mamela runs mamelet on these VMs, so packages, services and k3s
 // can be declared on them. The provider creates VMs (stopped; start-vm starts them), starts them,
-// grows their disks and changes their vCPUs and memory. It never shrinks a disk, replaces an
-// image, changes a network, or deletes a VM, and it never touches a VM without its marker.
+// grows their disks and changes their vCPUs and memory. It never shrinks a disk, replaces an image
+// or changes a network, and it never touches a VM without its marker. Deleting, restarting and
+// taking over a VM are explicit operations (explicit.go): a person asks for each by name.
+//
+// Its guard (guard.go) checks the cluster before and after every apply: the boundary of pool, VMID
+// range and node; the operating token's permissions; the room on the node; and that no guest
+// outside the boundary changed.
 package proxmox
 
 import (
@@ -31,7 +36,7 @@ import (
 // Name and Version are the provider's, as its manifest and Pome name them.
 const (
 	Name    = "proxmox"
-	Version = "0.1.0"
+	Version = "0.2.0"
 	// API is the API it talks to (Mamela's catalog "builtin:proxmox").
 	API = "proxmox"
 )
@@ -123,9 +128,13 @@ var (
 	createVM    = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu", Form: []string{"vmid", "name", "pool", "description", "ostype",
 		"cores", "memory", "scsihw", "scsi0", "boot", "serial0", "vga", "net0", "onboot", "ide2", "agent"}}
 	resizeDisk = protocol.Call{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/resize", Form: []string{"disk", "size", "digest"}}
-	setConfig  = protocol.Call{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/config", Form: []string{"cores", "memory", "tags", "digest"}}
-	startVM    = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/start"}
-	rebootVM   = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/reboot"}
+	setConfig  = protocol.Call{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/config"}
+	// What each operation sends of the configuration: only what it changes.
+	setSize   = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"cores", "memory", "digest"}}
+	setTags   = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"tags", "digest"}}
+	setMarker = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"description", "tags", "digest"}}
+	startVM   = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/start"}
+	rebootVM  = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/reboot"}
 )
 
 // Provider implements sdk.Provider.
@@ -164,16 +173,20 @@ func (Provider) Manifest() protocol.Manifest {
 		Schema: protocol.Schema, Provider: Name, Version: Version, API: API,
 		Observe:      append(pool("VM.Audit", "Pool.Audit"), storage("imageStorage", "Datastore.Audit")...),
 		ObserveCalls: []protocol.Call{listVMs, getConfig, listContent},
+		Guard:        &protocol.Guard{Calls: GuardCalls},
 		Kinds: []protocol.Kind{{Kind: Kind, Node: true, Operations: []protocol.Operation{
-			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, resizeDisk, setConfig)},
+			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, resizeDisk, setTags)},
 			{Op: OpStart, Support: protocol.Supported, Needs: pool("VM.PowerMgmt"), Calls: with(startVM)},
 			{Op: OpGrow, Support: protocol.Supported, Needs: append(pool("VM.Config.Disk"), storage("diskStorage", "Datastore.AllocateSpace")...), Calls: with(resizeDisk)},
-			{Op: OpResize, Support: protocol.Supported, Needs: pool("VM.Config.CPU", "VM.Config.Memory", "VM.PowerMgmt"), Calls: with(setConfig, rebootVM)},
-			{Op: OpTag, Support: protocol.Supported, Needs: pool("VM.Config.Options"), Calls: with(setConfig)},
+			{Op: OpResize, Support: protocol.Supported, Needs: pool("VM.Config.CPU", "VM.Config.Memory", "VM.PowerMgmt"), Calls: with(setSize, rebootVM)},
+			{Op: OpTag, Support: protocol.Supported, Needs: pool("VM.Config.Options"), Calls: with(setTags)},
 			unsupported(OpShrink, "shrinking a disk can destroy data"),
 			unsupported(OpReplaceImage, "changing the image would mean replacing the VM and its data"),
 			unsupported(OpChangeNetwork, "a VM gets its network once, when it is created"),
-			unsupported("delete-vm", "removing a declaration never deletes a VM"),
+			{Op: OpDelete, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt", "VM.Allocate"), Calls: with(stopVM, deleteVM)},
+			{Op: OpReboot, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(rebootVM)},
+			{Op: OpReset, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(resetVM)},
+			{Op: OpAdopt, Support: protocol.Supported, Explicit: true, Adopts: true, Needs: pool("VM.Config.Options"), Calls: with(setMarker)},
 		}}},
 	}
 }
@@ -254,6 +267,26 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 				fill(&o, vm, cfg, m, s.Tag)
 				mine[vmid], found = true, true
 				break
+			}
+		}
+		if !found {
+			// A VM of Mamela's built-in provider with this name: adoptable (adopt-vm), never
+			// created again.
+			for _, vmid := range slices.Sorted(maps.Keys(vms)) {
+				vm := vms[vmid]
+				if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax || mine[vmid] {
+					continue
+				}
+				cfg, err := config(ctx, h, vm.Node, vmid)
+				if err != nil {
+					return out, err
+				}
+				if m, ok := parseOldMarker(cfg.Description); ok && m.Name == r.Name {
+					fill(&o, vm, cfg, m, s.Tag)
+					o.Owned, o.Unfinished, o.Adoptable, o.Node = false, false, true, nil
+					mine[vmid], found = true, true
+					break
+				}
 			}
 		}
 		if !found {
@@ -464,6 +497,11 @@ func (p Provider) Apply(ctx context.Context, h *sdk.Host, in protocol.ApplyParam
 	if err != nil || node == "" {
 		return protocol.ApplyResult{}, errors.New("a change names one VM on one node")
 	}
+	if explicit(c.Op) {
+		if err := ensureOwn(ctx, h, c, node, vmid); err != nil {
+			return protocol.ApplyResult{}, err
+		}
+	}
 	ready := map[string]protocol.ArtifactInfo{}
 	for _, a := range c.Artifacts {
 		info, err := h.Artifact(ctx, a.ID)
@@ -486,8 +524,12 @@ func (p Provider) Apply(ctx context.Context, h *sdk.Host, in protocol.ApplyParam
 			continue
 		}
 		path := strings.NewReplacer("{node}", node, "{vmid}", strconv.FormatInt(vmid, 10), "{storage}", c.IDs["storage"]).Replace(a.Path)
+		req := protocol.HostRequest{Method: a.Method, Path: path, Form: params, Upload: a.Upload}
+		if a.Method == "DELETE" { // Proxmox reads a DELETE's parameters from the query
+			req.Form, req.Query = nil, params
+		}
 		var data jsontext.Value
-		if err := call(ctx, h, protocol.HostRequest{Method: a.Method, Path: path, Form: params, Upload: a.Upload}, &data); err != nil {
+		if err := call(ctx, h, req, &data); err != nil {
 			return protocol.ApplyResult{}, err
 		}
 		// Proxmox answers a long operation with its task ID: wait for it to end.
@@ -537,12 +579,12 @@ func (p Provider) inEffect(ctx context.Context, h *sdk.Host, node, storage strin
 			return false, err
 		}
 		return slices.Contains(cfg.Tags, params["tags"][0]), nil
-	case a.Path == startVM.Path:
+	case a.Path == startVM.Path, a.Path == stopVM.Path:
 		vms, err := list(ctx, h)
 		if err != nil {
 			return false, err
 		}
-		return vms[vmid].Status == "running", nil
+		return (vms[vmid].Status == "running") == (a.Path == startVM.Path), nil
 	}
 	return false, nil
 }
@@ -593,6 +635,10 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 	vms, err := list(ctx, h)
 	if err != nil {
 		return protocol.LookupResult{}, err
+	}
+	if explicit(c.Op) {
+		status, err := lookupExplicit(ctx, h, c, node, vmid, vms)
+		return protocol.LookupResult{Status: status}, err
 	}
 	vm, exists := vms[vmid]
 	if !exists {

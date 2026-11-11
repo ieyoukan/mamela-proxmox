@@ -30,6 +30,8 @@ type VM struct {
 	DiskGiB     int64
 	Tags        string
 	Running     bool
+	Type        string            // qemu (when empty) or lxc: a container is someone else's guest
+	Uptime      int64             // seconds, while running (120 when 0)
 	Config      map[string]string // other parameters, as created
 	Serial      int               // bumped on every change; the digest is derived from it
 }
@@ -46,10 +48,21 @@ type Server struct {
 	volumes map[string]string // volid -> content
 	// Uploads counts the uploads it received.
 	Uploads int
+	// Node is the one node of the fake cluster ("pve1"); Permissions are what /access/permissions
+	// answers for any token; MemAvailable (bytes) and DiskTotal, DiskUsed (bytes, of every storage)
+	// what the node's and storages' status say; ImportStorages the storages that accept images.
+	Node                              string
+	Permissions                       map[string]map[string]int
+	MemAvailable, DiskTotal, DiskUsed int64
+	ImportStorages                    []string
 }
 
-// New returns a fake with no VMs and empty storages.
-func New() *Server { return &Server{vms: map[int64]*VM{}, volumes: map[string]string{}} }
+// New returns a fake with no VMs and empty storages, on node pve1 with 64 GiB of memory available
+// and storages of 1 TiB, a tenth used, of which "local" accepts images to import.
+func New() *Server {
+	return &Server{vms: map[int64]*VM{}, volumes: map[string]string{}, Node: "pve1",
+		MemAvailable: 64 << 30, DiskTotal: 1 << 40, DiskUsed: 100 << 30, ImportStorages: []string{"local"}}
+}
 
 // Put stores a VM as is.
 func (s *Server) Put(v VM) {
@@ -102,19 +115,57 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out := []map[string]any{}
 		for _, id := range slices.Sorted(maps.Keys(s.vms)) {
 			v := s.vms[id]
-			status, uptime := "stopped", 0
+			status, uptime, typ := "stopped", int64(0), "qemu"
 			if v.Running {
 				status, uptime = "running", 120
+				if v.Uptime != 0 {
+					uptime = v.Uptime
+				}
 			}
-			out = append(out, map[string]any{"vmid": v.VMID, "name": v.Name, "node": v.Node, "pool": v.Pool, "type": "qemu",
+			if v.Type != "" {
+				typ = v.Type
+			}
+			out = append(out, map[string]any{"vmid": v.VMID, "name": v.Name, "node": v.Node, "pool": v.Pool, "type": typ,
 				"status": status, "uptime": uptime})
 		}
 		reply(w, 200, out)
 	})
+	mux.HandleFunc("GET /cluster/status", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, []map[string]any{{"type": "cluster", "name": "fake", "quorate": 1, "nodes": 1},
+			{"type": "node", "name": s.Node, "online": 1}})
+	})
+	mux.HandleFunc("GET /nodes/{node}/status", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, map[string]any{"memory": map[string]any{"available": s.MemAvailable, "free": s.MemAvailable, "total": 128 << 30}})
+	})
+	mux.HandleFunc("GET /nodes/{node}/storage/{storage}/status", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, map[string]any{"total": s.DiskTotal, "used": s.DiskUsed})
+	})
+	mux.HandleFunc("GET /nodes/{node}/storage", func(w http.ResponseWriter, r *http.Request) {
+		out := []map[string]any{}
+		for _, st := range s.ImportStorages {
+			out = append(out, map[string]any{"storage": st})
+		}
+		reply(w, 200, out)
+	})
+	mux.HandleFunc("GET /access/permissions", func(w http.ResponseWriter, r *http.Request) {
+		perms := s.Permissions
+		if perms == nil {
+			perms = map[string]map[string]int{}
+		}
+		reply(w, 200, perms)
+	})
+	mux.HandleFunc("GET /nodes/{node}/lxc/{vmid}/config", func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.ParseInt(r.PathValue("vmid"), 10, 64)
+		if v, ok := s.vms[id]; ok && v.Type == "lxc" {
+			reply(w, 200, map[string]any{"digest": v.digest(), "hostname": v.Name})
+			return
+		}
+		reply(w, 500, nil)
+	})
 	vm := func(w http.ResponseWriter, r *http.Request) *VM {
 		id, _ := strconv.ParseInt(r.PathValue("vmid"), 10, 64)
 		v, ok := s.vms[id]
-		if !ok || v.Node != r.PathValue("node") {
+		if !ok || v.Node != r.PathValue("node") || v.Type == "lxc" {
 			reply(w, 500, nil)
 			return nil
 		}
@@ -242,6 +293,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if t := r.PostForm.Get("tags"); t != "" {
 			v.Tags = t
 		}
+		if d, ok := r.PostForm["description"]; ok {
+			v.Description = d[0]
+		}
 		v.Serial++
 		reply(w, 200, nil)
 	})
@@ -254,6 +308,36 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/reboot", func(w http.ResponseWriter, r *http.Request) {
 		if v := vm(w, r); v != nil {
 			reply(w, 200, upid(v.Node, "qmreboot", v.VMID))
+		}
+	})
+	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/reset", func(w http.ResponseWriter, r *http.Request) {
+		if v := vm(w, r); v != nil {
+			if !v.Running {
+				reply(w, 500, "VM is not running")
+				return
+			}
+			reply(w, 200, upid(v.Node, "qmreset", v.VMID))
+		}
+	})
+	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/stop", func(w http.ResponseWriter, r *http.Request) {
+		if v := vm(w, r); v != nil {
+			v.Running = false
+			reply(w, 200, upid(v.Node, "qmstop", v.VMID))
+		}
+	})
+	// Proxmox refuses to delete a running VM; it reads a DELETE's parameters from the query.
+	mux.HandleFunc("DELETE /nodes/{node}/qemu/{vmid}", func(w http.ResponseWriter, r *http.Request) {
+		if v := vm(w, r); v != nil {
+			if v.Running {
+				reply(w, 500, "VM is running")
+				return
+			}
+			if r.URL.Query().Get("destroy-unreferenced-disks") != "1" || r.ContentLength > 0 {
+				reply(w, 400, "destroy-unreferenced-disks=1 is expected in the query")
+				return
+			}
+			delete(s.vms, v.VMID)
+			reply(w, 200, upid(v.Node, "qmdestroy", v.VMID))
 		}
 	})
 	mux.HandleFunc("GET /nodes/{node}/tasks/{upid}/status", func(w http.ResponseWriter, r *http.Request) {

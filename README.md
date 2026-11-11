@@ -22,21 +22,48 @@
 | `resize-vm` | vCPU とメモリを変える（動いていれば再起動する） |
 | `tag-vm` | 中断された作成の、タグ付けの続き |
 
-しないこと:
+しないこと（差分としては示し、Mamela が拒みます）:
 
 - ディスクの縮小
 - イメージの変更
 - ネットワークの変更
-- 削除
 
-マーカーのない VM には触れません。
+マーカーのない VM には触れません。宣言を消しても、VM は消しません。
+
+### 明示操作
+
+plan には入らず、人が名前を打ち直したときだけ行う操作です（`mamela act <op> <resource> --confirm <name>`）。対象は、Mamela が作成を記録した VM に限ります。
+
+| 操作 | 内容 |
+|---|---|
+| `delete-vm` | 止めてから、VM とディスクを消す（データを失う） |
+| `reboot-vm` | ゲストに再起動を頼む（ACPI） |
+| `reset-vm` | すぐに再起動する（リセットボタンと同じ。応答しないゲスト向け） |
+| `adopt-vm` | Mamela の旧組み込みプロバイダーが作った VM を引き継ぐ（このプロバイダーのマーカーとタグを書く） |
+
+送る直前に、VMID の VM がまだその名前のマーカーを持つことを確かめます。違えば何も送りません。
+
+### guard（適用の前後の安全確認）
+
+Proxmox のクラスタには、Mamela と関係のないゲストが動いていることがあります。Mamela は、このプロバイダーの変更を apply する前後に guard を呼びます。guard は読み取りしかできず、lab の外も見える監査用の Token（`guard_token_id`）で読みます。
+
+| コード | 前 / 後 | 確かめること |
+|---|---|---|
+| `PVE-0001`〜`0003` | 前 | クォーラム、ノードの数、対象のノードが動いていること |
+| `PVE-0101`・`0102` | 前 | 操作用の Token の権限が、このプロバイダーに要る権限とちょうど同じこと（多すぎも少なすぎも止める） |
+| `PVE-0201`〜`0203` | 前 | 変更の後に残るメモリとストレージの余裕、イメージを置けるストレージ |
+| `PVE-0301`〜`0303` | 前 | pool と VMID の範囲に他人のゲストがないこと、VM の数 |
+| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ）の中にあること。宣言が何を書いても、ここで止まる |
+| `PVE-0400`〜`0405` | 後 | 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと |
+
+`block` が 1 つでもあれば、Mamela はそのプロバイダーの変更を送りません。
 
 ## 使い方
 
 宣言の Pome に足します。
 
 ```bash
-emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.1.0
+emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.0
 ```
 
 Mamela が依存から見つけて、隔離して動かします。プログラムは Pome.lock と sumdb で固定され、`mamela-provider.toml` の sha256 で確かめられます。
@@ -66,7 +93,38 @@ token_id = "mamela@pve!lab"
 token_file = "~/.config/mamela/lab-token"
 tls_fingerprint = "AA:BB:..."
 catalog = "builtin:proxmox"
+# guard だけが使う、読み取り専用の監査用 Token（PVEAuditor）
+guard_token_id = "mamela-audit@pve!audit"
+guard_token_file = "~/.config/mamela/audit-token"
+
+# guard の設定: 運用者が決める境界と安全の閾値（秘密ではない）
+[provider.proxmox.guard]
+node = "pve1"
+pool = "mamela"
+vmid_min = 7000
+vmid_max = 7099
+tag = "mamela"
+disk_storage = "local-lvm"
+image_storage = "local"
+bridge = "vmbr0"
+operating_token = "mamela@pve!lab"     # token_id と同じ
+max_vms = 6
+min_host_mem_available_mib = 4096
+max_storage_used_percent = 85
 ```
+
+### 準備と片付け（root で実行するスクリプト）
+
+Mamela の Token には、pool や Token や ACL を作る権限はありません。`mamela-proxmox` が、人が読んでから root で実行するスクリプトを作ります。Proxmox には何も送りません。
+
+```bash
+go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest permissions --providers mamela.providers.toml  # 権限と、それが要る操作
+go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest bootstrap   --providers mamela.providers.toml > bootstrap.sh
+go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest cleanup     --providers mamela.providers.toml > cleanup.sh
+```
+
+- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。
+- **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ消します。
 
 ## 開発
 

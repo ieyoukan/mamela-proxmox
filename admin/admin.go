@@ -1,0 +1,223 @@
+// Package admin makes the scripts a person reviews and runs as root on a Proxmox node to set up
+// and tidy the boundary the provider works in (ADR 0006 of Mamela): Mamela's tokens can never do
+// these things themselves. It reads mamela.providers.toml and makes no request to Proxmox.
+package admin
+
+import (
+	"encoding/json/v2"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+
+	"github.com/ieyoukan/mamela-proxmox/proxmox"
+)
+
+// Config is what the scripts need of a provider's entry in mamela.providers.toml.
+type Config struct {
+	Guard          proxmox.GuardSettings
+	TokenID        string // the operating token
+	TokenFile      string
+	GuardTokenID   string // the audit token
+	GuardTokenFile string
+}
+
+// Load reads the entry of provider name in a mamela.providers.toml.
+func Load(path, name string) (Config, error) {
+	var file struct {
+		Provider map[string]struct {
+			TokenID        string         `toml:"token_id"`
+			TokenFile      string         `toml:"token_file"`
+			GuardTokenID   string         `toml:"guard_token_id"`
+			GuardTokenFile string         `toml:"guard_token_file"`
+			Guard          map[string]any `toml:"guard"`
+		} `toml:"provider"`
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	if _, err := toml.Decode(string(b), &file); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	p, ok := file.Provider[name]
+	if !ok {
+		return Config{}, fmt.Errorf("%s has no [provider.%s]", path, name)
+	}
+	guard, err := json.Marshal(p.Guard, json.Deterministic(true))
+	if err != nil || p.Guard == nil {
+		return Config{}, fmt.Errorf("%s: [provider.%s.guard] is required: the boundary and safety settings", path, name)
+	}
+	g, err := proxmox.ParseGuardSettings(guard)
+	if err != nil {
+		return Config{}, err
+	}
+	c := Config{Guard: g, TokenID: p.TokenID, TokenFile: p.TokenFile, GuardTokenID: p.GuardTokenID, GuardTokenFile: p.GuardTokenFile}
+	switch {
+	case c.TokenID != g.OperatingToken:
+		return Config{}, fmt.Errorf("[provider.%s]: token_id %q and guard.operating_token %q must be the same token", name, c.TokenID, g.OperatingToken)
+	case !strings.Contains(c.GuardTokenID, "!") || c.GuardTokenFile == "":
+		return Config{}, fmt.Errorf("[provider.%s]: guard_token_id (user@realm!name) and guard_token_file are required: the guard's read-only audit token", name)
+	case user(c.GuardTokenID) == user(c.TokenID):
+		return Config{}, fmt.Errorf("[provider.%s]: the audit token must belong to another user than the operating token (it may see the whole cluster)", name)
+	}
+	return c, nil
+}
+
+func user(token string) string { u, _, _ := strings.Cut(token, "!"); return u }
+
+func tokenName(token string) string { _, n, _ := strings.Cut(token, "!"); return n }
+
+// role is the role of a grant's path: one per path, so a privilege never reaches a path that does
+// not need it. The names are those of the earlier lab bootstrap, so that running this one on a
+// lab set up by it converges.
+func role(g proxmox.GuardSettings, path string) string {
+	switch path {
+	case "/pool/" + g.Pool:
+		return "MamelaLabVM"
+	case "/storage/" + g.DiskStorage:
+		return "MamelaLabDisk"
+	case "/storage/" + g.ImageStorage:
+		return "MamelaLabImage"
+	}
+	if strings.HasPrefix(path, "/sdn/") {
+		return "MamelaLabNet"
+	}
+	return "MamelaLab" + strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, path)
+}
+
+// Permissions explains every grant: the path, the role, each privilege and the operations that
+// need it.
+func Permissions(c Config) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "The operating token %s gets exactly these privileges (from the provider's manifest):\n", c.TokenID)
+	for _, g := range proxmox.Grants(proxmox.Provider{}.Manifest(), c.Guard) {
+		fmt.Fprintf(&b, "\n%s (role %s)\n", g.Path, role(c.Guard, g.Path))
+		for _, p := range g.Privs {
+			fmt.Fprintf(&b, "  %-26s %s\n", p, strings.Join(g.Reasons[p], ", "))
+		}
+	}
+	fmt.Fprintf(&b, "\nA pool's privileges reach the VMs in it (/vms/%d..%d). The guard blocks an apply when the token holds\n"+
+		"anything else, or lacks any of these. The audit token %s gets PVEAuditor (read-only) on /.\n", c.Guard.VMIDMin, c.Guard.VMIDMax, c.GuardTokenID)
+	return b.String()
+}
+
+// Bootstrap is the setup script: the pool, the import content type on the image storage, one role
+// per path, the operating user and token with exactly the grants, the removal of their grants that
+// are no longer needed, and the audit user and token. Running it again converges.
+func Bootstrap(c Config) string {
+	g := c.Guard
+	grants := proxmox.Grants(proxmox.Provider{}.Manifest(), g)
+	opUser, auditUser := user(c.TokenID), user(c.GuardTokenID)
+	var b strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+
+	w("#!/usr/bin/env bash")
+	w("# Mamela Proxmox bootstrap — generated by `mamela-proxmox bootstrap`. Review every line before running it.")
+	w("# Run as root on one node of the cluster. It adds a pool, roles, users, tokens and ACLs, and removes ACL")
+	w("# entries of %s and %s that the provider no longer needs. It touches no guest, no other", opUser, c.TokenID)
+	w("# user's permissions, and no storage, network or HA setting except step 2.")
+	w("set -euo pipefail")
+	w("")
+	w("exists() { pvesh get \"$1\" --output-format json >/dev/null 2>&1; }")
+	w("ensure_role() { if exists \"/access/roles/$1\"; then pveum role modify \"$1\" --privs \"$2\"; else pveum role add \"$1\" --privs \"$2\"; fi; }")
+	w("ensure_user() { exists \"/access/users/$1\" || pveum user add \"$1\" --comment \"$2\"; }")
+	w("new_token() { # prints the secret once; store it in the given file with mode 600")
+	w("  if exists \"/access/users/$1/token/$2\"; then echo \"token $1!$2 already exists (secret not shown again)\"; return; fi")
+	w("  echo \"== token $1!$2 — save the 'value' below into $3 (chmod 600) on the machine that runs Mamela\"")
+	w("  pveum user token add \"$1\" \"$2\" --privsep 1 --comment \"$4\"")
+	w("}")
+	w("")
+	w("# 1. The pool. The provider creates VMs only inside it.")
+	w("exists \"/pools/%s\" || pveum pool add %s --comment \"Mamela: guests here are managed by Mamela\"", g.Pool, g.Pool)
+	w("")
+	w("# 2. Let the image storage hold importable disk images (content type \"import\"). This only adds")
+	w("#    \"import\" to the storage's content types; the existing ones are kept.")
+	w("content=\"$(pvesh get /storage/%s --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"content\"])')\"", g.ImageStorage)
+	w("case \",$content,\" in *,import,*) ;; *) pvesm set %s --content \"$content,import\" ;; esac", g.ImageStorage)
+	w("")
+	w("# 3. One role per path, with only the privileges that path needs (mamela-proxmox permissions says why).")
+	for _, gr := range grants {
+		w("ensure_role %s %q", role(g, gr.Path), strings.Join(gr.Privs, ","))
+	}
+	w("")
+	w("# 4. The operating user and its privilege-separated token (no password, no login).")
+	w("ensure_user %s \"Mamela Proxmox provider\"", opUser)
+	w("new_token %s %s %q \"Mamela: changes inside pool %s only\"", opUser, tokenName(c.TokenID), c.TokenFile, g.Pool)
+	w("")
+	w("# 5. ACLs. With privilege separation, the token gets the intersection of its own ACLs and its user's,")
+	w("#    so both receive the same grants. Nothing is granted on /, /vms or other pools.")
+	var keep []string
+	for _, gr := range grants {
+		w("pveum acl modify %s --users %s --roles %s", gr.Path, opUser, role(g, gr.Path))
+		w("pveum acl modify %s --tokens '%s' --roles %s", gr.Path, c.TokenID, role(g, gr.Path))
+		keep = append(keep, gr.Path+" "+role(g, gr.Path))
+	}
+	w("")
+	w("# 6. Remove the operating user's and token's ACL entries that are not in step 5 (left by earlier")
+	w("#    versions of this script). Only these two identities are looked at.")
+	w("keep=%q", strings.Join(keep, "\n"))
+	w("pvesh get /access/acl --output-format json | python3 -c '%s' \"$keep\" '%s' '%s' |", staleACLs, opUser, c.TokenID)
+	w("while read -r type ugid path role; do")
+	w("  echo \"removing role $role on $path from $ugid (the provider no longer needs it)\"")
+	w("  if [ \"$type\" = token ]; then pveum acl delete \"$path\" --tokens \"$ugid\" --roles \"$role\"; else pveum acl delete \"$path\" --users \"$ugid\" --roles \"$role\"; fi")
+	w("done")
+	w("")
+	w("# 7. The audit token: read-only everywhere (built-in PVEAuditor). Only the guard uses it, to check")
+	w("#    the cluster and that guests outside the boundary are unchanged.")
+	w("ensure_user %s \"Mamela audit (read-only)\"", auditUser)
+	w("new_token %s %s %q \"Mamela: read-only audit\"", auditUser, tokenName(c.GuardTokenID), c.GuardTokenFile)
+	w("pveum acl modify / --users %s --roles PVEAuditor", auditUser)
+	w("pveum acl modify / --tokens '%s' --roles PVEAuditor", c.GuardTokenID)
+	w("")
+	w("echo \"done. next: mamela guard <pome-dir> (the guard's check before an apply)\"")
+	return b.String()
+}
+
+// staleACLs prints "type ugid path role" for every ACL entry of the given user or token (argv 2, 3)
+// whose (path, role) is not one of the lines in argv 1.
+const staleACLs = `import json,sys
+keep=set(tuple(l.split(" ",1)) for l in sys.argv[1].split("\\n") if l)
+for a in json.load(sys.stdin):
+    if a["ugid"] in (sys.argv[2], sys.argv[3]) and (a["path"], a["roleid"]) not in keep:
+        print(a["type"], a["ugid"], a["path"], a["roleid"])`
+
+// Cleanup is a script that finds the files the provider uploaded to the image storage (images and
+// seeds, named mamela-...) that no VM of the cluster uses, lists them, and removes them only when
+// run with --free. The provider's token cannot remove files: that would need Datastore.Allocate on
+// the whole storage, which also holds other guests' backups and templates.
+func Cleanup(c Config) string {
+	var b strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
+	w("#!/usr/bin/env bash")
+	w("# Mamela Proxmox cleanup — generated by `mamela-proxmox cleanup`. Review it before running it as root.")
+	w("# It lists the files on storage %s whose names start with mamela- and that no VM of the cluster", c.Guard.ImageStorage)
+	w("# refers to. It removes them only when run with --free.")
+	w("set -euo pipefail")
+	w("unused=\"$(python3 -c '%s' %s %s)\"", unusedVolumes, c.Guard.Node, c.Guard.ImageStorage)
+	w("if [ -z \"$unused\" ]; then echo 'nothing to remove'; exit 0; fi")
+	w("echo \"unused uploads:\"; echo \"$unused\"")
+	w("if [ \"${1:-}\" != --free ]; then echo 'run again with --free to remove them'; exit 0; fi")
+	w("echo \"$unused\" | while read -r vol; do pvesm free \"$vol\"; done")
+	return b.String()
+}
+
+// unusedVolumes prints the mamela-* volumes of storage argv 2 (as seen from node argv 1) that no
+// VM's configuration refers to, on any node.
+const unusedVolumes = `import json,subprocess,sys
+def get(p, *a): return json.loads(subprocess.check_output(["pvesh","get",p,"--output-format","json",*a]))
+used=set()
+for r in get("/cluster/resources","--type","vm"):
+    if r.get("type")!="qemu": continue
+    for v in get("/nodes/%s/qemu/%d/config"%(r["node"],r["vmid"])).values():
+        for part in str(v).split(","):
+            used.add(part.split("import-from=")[-1])
+for content in ("iso","import"):
+    for v in get("/nodes/%s/storage/%s/content"%(sys.argv[1],sys.argv[2]),"--content",content):
+        if v["volid"].split("/",1)[-1].startswith("mamela-") and v["volid"] not in used: print(v["volid"])`
