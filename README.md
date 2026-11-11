@@ -85,7 +85,7 @@ Mamela.empty()
   |> Mamela.service_on(Proxmox.node(web), "nginx", True, True)
 ```
 
-`mamela.providers.toml` に、API の場所と Token を書きます。カタログは Mamela のものを使います。
+`mamela.providers.toml` に、API の場所と Token を書きます。カタログは、この Pome が同梱するもの（`pome/catalogs/proxmox.json`）を名前で選びます。Mamela は、プログラムのすべての要求をこのカタログで分類します（Mamela の ADR 0008）。中身は `mamela provider catalog pome` で読めます。
 
 ```toml
 [provider.proxmox]
@@ -94,7 +94,7 @@ auth = "proxmox"
 token_id = "mamela@pve!lab"
 token_file = "~/.config/mamela/lab-token"
 tls_fingerprint = "AA:BB:..."
-catalog = "builtin:proxmox"
+catalog = "pome:proxmox"
 # guard だけが使う、読み取り専用の監査用 Token（PVEAuditor）
 guard_token_id = "mamela-audit@pve!audit"
 guard_token_file = "~/.config/mamela/audit-token"

@@ -37,7 +37,7 @@ import (
 const (
 	Name    = "proxmox"
 	Version = "0.2.0"
-	// API is the API it talks to (Mamela's catalog "builtin:proxmox").
+	// API is the API it talks to (its catalog: pome/catalogs/proxmox.json, "pome:proxmox").
 	API = "proxmox"
 )
 

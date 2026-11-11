@@ -3,4 +3,9 @@
 provider = "proxmox"
 version = "0.2.0"
 program = "provider.wasm"
-sha256 = "659e46aa8e1144b864d537c85500bcd46915506cff8c3a375fec8642d403ccee"
+sha256 = "b97fb1309b87b1709506fcb74630b4b652716e22b0d78954609646d1ab8b1ea3"
+
+# The catalog of the API the provider calls (ADR 0008 of Mamela). Mamela classifies the program's
+# requests with it only when the operator names it (mamela.providers.toml: catalog = "pome:proxmox").
+[catalogs]
+proxmox = "catalogs/proxmox.json"

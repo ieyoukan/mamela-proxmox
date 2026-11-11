@@ -1,0 +1,213 @@
+{
+  "schema": "mamela-catalog/v1",
+  "api": "proxmox",
+  "entries": [
+    {
+      "method": "GET",
+      "path": "/cluster/resources",
+      "effect": "read",
+      "query": [
+        "type"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/qemu/{vmid}/config",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/qemu/{vmid}/status/current",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/tasks/{upid}/status",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/tasks",
+      "effect": "read",
+      "query": [
+        "vmid",
+        "typefilter",
+        "source",
+        "limit"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage/{storage}/content",
+      "effect": "read",
+      "query": [
+        "content"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/cluster/status",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/status",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage/{storage}/status",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage",
+      "effect": "read",
+      "query": [
+        "content"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/access/permissions",
+      "effect": "read",
+      "query": [
+        "userid",
+        "path"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/lxc/{vmid}/config",
+      "effect": "read"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/storage/{storage}/upload",
+      "effect": "create",
+      "form": [
+        "content",
+        "checksum-algorithm",
+        "checksum"
+      ],
+      "file": "filename"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu",
+      "effect": "create",
+      "form": [
+        "vmid",
+        "name",
+        "cores",
+        "memory",
+        "pool",
+        "scsi0",
+        "scsihw",
+        "ostype",
+        "description",
+        "boot",
+        "serial0",
+        "vga",
+        "net0",
+        "onboot",
+        "ide2",
+        "agent"
+      ],
+      "measures": [
+        {
+          "param": "cores",
+          "name": "cpu",
+          "format": "count"
+        },
+        {
+          "param": "memory",
+          "name": "memoryMiB",
+          "format": "count"
+        },
+        {
+          "param": "scsi0",
+          "name": "diskGiB",
+          "format": "drive"
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/{node}/qemu/{vmid}/config",
+      "effect": "change",
+      "form": [
+        "cores",
+        "memory",
+        "tags",
+        "description",
+        "digest"
+      ],
+      "precondition": "digest",
+      "measures": [
+        {
+          "param": "cores",
+          "name": "cpu",
+          "format": "count"
+        },
+        {
+          "param": "memory",
+          "name": "memoryMiB",
+          "format": "count"
+        }
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/{node}/qemu/{vmid}/resize",
+      "effect": "change",
+      "form": [
+        "disk",
+        "size",
+        "digest"
+      ],
+      "precondition": "digest",
+      "measures": [
+        {
+          "param": "size",
+          "name": "diskGiB",
+          "format": "size"
+        }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/start",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/reboot",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/reset",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/shutdown",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/stop",
+      "effect": "restart"
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/{node}/qemu/{vmid}",
+      "effect": "lose-data",
+      "query": [
+        "purge",
+        "destroy-unreferenced-disks"
+      ]
+    }
+  ]
+}

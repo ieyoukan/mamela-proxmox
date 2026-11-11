@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ieyoukan/mamela-proxmox/catalogs"
 	"github.com/ieyoukan/mamela-proxmox/fakepve"
 	"github.com/ieyoukan/mamela-proxmox/proxmox"
-	"github.com/ieyoukan/mamela/provider/catalogs"
 	"github.com/ieyoukan/mamela/provider/protocol"
 	"github.com/ieyoukan/mamela/provider/providertest"
 )
@@ -58,7 +58,7 @@ func oldVM(vmid int64, name string) fakepve.VM {
 func TestConformance(t *testing.T) {
 	providertest.Run(t, providertest.Suite{
 		Provider:      providertest.BuildWASI(t, "../cmd/proxmox-provider"),
-		Catalog:       catalogs.Proxmox,
+		Catalog:       providertest.Catalog(t, "../pome/catalogs/proxmox.json"), // as the Pome ships it
 		NewAPI:        func() http.Handler { return newFake() },
 		GuardSettings: guardSettings,
 		ScriptCredentials: protocol.ScriptCredentials{TokenID: "mamela@pve!lab", TokenFile: "/token",
@@ -103,5 +103,24 @@ func TestPomeProgramIsTheBuild(t *testing.T) {
 	toml, _ := os.ReadFile("../pome/mamela-provider.toml")
 	if !strings.Contains(string(toml), `sha256 = "`+hex.EncodeToString(sum[:])+`"`) {
 		t.Error("pome/mamela-provider.toml does not name the program: run ./build.sh")
+	}
+}
+
+// The catalog the Pome ships is exactly what the catalogs package writes (build.sh), and
+// mamela-provider.toml lists it.
+func TestShippedCatalogIsTheSource(t *testing.T) {
+	toml, _ := os.ReadFile("../pome/mamela-provider.toml")
+	for name, c := range catalogs.All {
+		want, err := catalogs.Encode(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile("../pome/catalogs/" + name + ".json")
+		if !bytes.Equal(got, want) {
+			t.Errorf("pome/catalogs/%s.json is not what catalogs writes: run ./build.sh", name)
+		}
+		if !strings.Contains(string(toml), name+` = "catalogs/`+name+`.json"`) {
+			t.Errorf("pome/mamela-provider.toml does not list catalog %s: run ./build.sh", name)
+		}
 	}
 }

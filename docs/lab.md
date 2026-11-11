@@ -43,7 +43,7 @@
 | ファイル | 中身 | 置き場所 |
 |---|---|---|
 | `mamela.site.toml` | Mamela の site（`mamela-site/v1`）。Control Plane、VM のログインユーザーと SSH 鍵、ネットワークの規則（DHCP、固定アドレスの範囲）、1 台あたりの上限 | gitignore |
-| `mamela.providers.toml` | `[provider.proxmox]`: API の URL、`auth = "proxmox"`、操作用 Token（`token_id`、`token_file`）、`tls_fingerprint`、`catalog = "builtin:proxmox"`、guard 用の監査 Token（`guard_token_id`、`guard_token_file`）。`[provider.proxmox.guard]`: 境界と安全の閾値 | gitignore |
+| `mamela.providers.toml` | `[provider.proxmox]`: API の URL、`auth = "proxmox"`、操作用 Token（`token_id`、`token_file`）、`tls_fingerprint`、`catalog = "pome:proxmox"`（この Pome が同梱するカタログ）、guard 用の監査 Token（`guard_token_id`、`guard_token_file`）。`[provider.proxmox.guard]`: 境界と安全の閾値 | gitignore |
 | 宣言 | `Proxmox.Site`（node、pool、ストレージ、bridge、tag、VMID の範囲）と `Proxmox.vm` | 実アドレスを含むなら gitignore した場所 |
 
 設定の例は [README](../README.md#使い方) にある。
