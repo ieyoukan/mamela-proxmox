@@ -749,7 +749,7 @@ func call(ctx context.Context, h *sdk.Host, r protocol.HostRequest, out any) err
 		return err
 	}
 	if resp.Status != 200 {
-		return fmt.Errorf("%s %s: status %d: %.300s", r.Method, r.Path, resp.Status, resp.Body)
+		return fmt.Errorf("%s %s: status %d %s: %.300s", r.Method, r.Path, resp.Status, resp.Reason, resp.Body)
 	}
 	var env struct {
 		Data jsontext.Value `json:"data"`
