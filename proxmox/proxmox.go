@@ -46,6 +46,11 @@ const (
 	OpGrow   protocol.Op = "grow-vm-disk"
 	OpResize protocol.Op = "resize-vm"
 	OpTag    protocol.Op = "tag-vm"
+
+	// Never carried out (the manifest says why); a difference is shown and denied.
+	OpShrink        protocol.Op = "shrink-vm-disk"
+	OpReplaceImage  protocol.Op = "replace-vm-image"
+	OpChangeNetwork protocol.Op = "change-vm-network"
 )
 
 // Image is a pinned cloud image a VM can be created from. Changing an entry is a reviewed change
@@ -165,9 +170,9 @@ func (Provider) Manifest() protocol.Manifest {
 			{Op: OpGrow, Support: protocol.Supported, Needs: append(pool("VM.Config.Disk"), storage("diskStorage", "Datastore.AllocateSpace")...), Calls: with(resizeDisk)},
 			{Op: OpResize, Support: protocol.Supported, Needs: pool("VM.Config.CPU", "VM.Config.Memory", "VM.PowerMgmt"), Calls: with(setConfig, rebootVM)},
 			{Op: OpTag, Support: protocol.Supported, Needs: pool("VM.Config.Options"), Calls: with(setConfig)},
-			unsupported("shrink-vm-disk", "shrinking a disk can destroy data"),
-			unsupported("replace-vm-image", "changing the image would mean replacing the VM and its data"),
-			unsupported("change-vm-network", "a VM gets its network once, when it is created"),
+			unsupported(OpShrink, "shrinking a disk can destroy data"),
+			unsupported(OpReplaceImage, "changing the image would mean replacing the VM and its data"),
+			unsupported(OpChangeNetwork, "a VM gets its network once, when it is created"),
 			unsupported("delete-vm", "removing a declaration never deletes a VM"),
 		}}},
 	}
@@ -292,15 +297,25 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 
 func fill(o *protocol.Observed, vm resource, cfg vmConfig, m marker, tag string) {
 	running := vm.Status == "running"
-	o.Exists, o.Owned, o.Version = true, true, cfg.Digest
+	tagged := tag != "" && slices.Contains(cfg.Tags, tag)
+	o.Exists, o.Version = true, cfg.Digest
+	o.Owned, o.Unfinished = Ownership(tag == "" || tagged)
 	o.IDs = ids(vm.Node, vm.VMID)
 	o.Node = &protocol.ObservedNode{ID: vm.VMID, Running: running}
 	if running {
 		o.Node.UptimeSeconds = vm.Uptime
 	}
 	st := State{CPU: cfg.Cores, MemoryMiB: cfg.Memory, DiskGiB: cfg.DiskGiB, Image: m.Image, Network: m.Network,
-		Tagged: tag != "" && slices.Contains(cfg.Tags, tag), Running: running}
+		Tagged: tagged, Running: running}
 	o.State, _ = json.Marshal(st, json.Deterministic(true))
+}
+
+// Ownership is the provider's claim on a VM that carries its marker, in the pool and the VMID
+// range: owned when it also has the tag, unfinished when it does not (a create interrupted before
+// tagging). Mamela keeps either claim only for a VM it recorded creating (ADR 0004 of Mamela).
+// Undeclared VMs are found by the marker alone (their tag is not known here): tagged reports true.
+func Ownership(tagged bool) (owned, unfinished bool) {
+	return tagged, !tagged
 }
 
 func ids(node string, vmid int64) map[string]string {
@@ -388,6 +403,20 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 			if !st.Running {
 				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart, IDs: id,
 					Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}}, Reasons: []string{"it is stopped"}})
+			}
+			// What it never changes is still a difference: reported as a change of an unsupported
+			// operation (nothing to send), which Mamela shows and denies.
+			unsupported := func(op protocol.Op, why string) {
+				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: op, IDs: id, Reasons: []string{why}})
+			}
+			if st.DiskGiB > s.DiskGiB {
+				unsupported(OpShrink, fmt.Sprintf("disk %d -> %d GiB", st.DiskGiB, s.DiskGiB))
+			}
+			if st.Image != s.Image {
+				unsupported(OpReplaceImage, fmt.Sprintf("image %s -> %s", st.Image, s.Image))
+			}
+			if want := NetworkString(s.Network); st.Network != want {
+				unsupported(OpChangeNetwork, fmt.Sprintf("network %s -> %s", st.Network, want))
 			}
 		}
 	}
