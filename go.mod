@@ -4,6 +4,6 @@ go 1.27
 
 toolchain go1.27.3
 
-require github.com/ieyoukan/mamela v0.0.0-20261111045618-ff4e4950b2c0
+require github.com/ieyoukan/mamela v0.0.0-20261111081338-c05454acd294
 
 require github.com/BurntSushi/toml v1.6.0 // indirect

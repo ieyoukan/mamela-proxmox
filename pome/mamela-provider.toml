@@ -3,4 +3,4 @@
 provider = "proxmox"
 version = "0.2.0"
 program = "provider.wasm"
-sha256 = "6b1af7bfbd89e400e6564f39beb32d3ff7f0264d3ad33ca25fd0a0949fda1557"
+sha256 = "9ee3455bebfdec77787197b41f205892002cc612063d243200ca5ace3ef1fc97"

@@ -160,12 +160,12 @@ func lookupExplicit(ctx context.Context, h *sdk.Host, c protocol.Change, node st
 		}
 		return protocol.LookupNotDone, nil
 	case OpReboot, OpReset:
-		// A restart leaves no trace but the guest's uptime, which the change does not know: a VM
-		// that runs is taken as restarted, so that a restart is never repeated without the person.
-		if mine && vm.Status == "running" {
-			return protocol.LookupDone, nil
+		// A restart leaves no trace this change can be tied to (a running VM may have restarted or
+		// not): unknown, never done. Mamela keeps the outcome unknown, and the person looks.
+		if !mine {
+			return protocol.LookupNotDone, nil // the VM is not there to restart
 		}
-		return protocol.LookupNotDone, nil
+		return protocol.LookupUnknown, nil
 	case OpAdopt:
 		s := ""
 		for _, r := range c.Requests {

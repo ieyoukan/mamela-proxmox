@@ -195,3 +195,61 @@ func TestOldMarker(t *testing.T) {
 		}
 	}
 }
+
+func startChange(vmid string) protocol.Change {
+	return protocol.Change{Resource: "ProxmoxVM x", Kind: Kind, Op: OpStart, IDs: map[string]string{"node": "pve1", "vmid": vmid},
+		Requests: []protocol.Approved{{Method: "POST", Path: startVM.Path}}, Late: true}
+}
+
+// Starting a stopped VM needs its memory: with 5 GiB available and 4 GiB to keep, an 8 GiB VM may
+// not start (the guard used to count 0 MiB for a start).
+func TestStartingAStoppedVMCountsItsMemory(t *testing.T) {
+	f := healthy()
+	f.MemAvailable = 5 << 30
+	f.Guests = append(f.Guests, Guest{VMID: 7001, Type: "qemu", Node: "pve1", Name: "big", Pool: "lab", Status: "stopped", MemoryMiB: 8192, DiskGiB: 20})
+	fs := Check(settings, Provider{}.Manifest(), f, []protocol.Change{startChange("7001")})
+	if !slices.Contains(codes(fs, protocol.SeverityBlock), "PVE-0201") {
+		t.Fatalf("an 8 GiB start with 5 GiB available: %+v", fs)
+	}
+	if n := NeedOf([]protocol.Change{startChange("7001")}, f.Guests); n.MemoryMiB != 8192 {
+		t.Fatalf("need %+v", n)
+	}
+}
+
+func TestNeedCountsEachVMOnce(t *testing.T) {
+	guests := []Guest{
+		{VMID: 7001, Type: "qemu", Status: "running", MemoryMiB: 2048, DiskGiB: 10},
+		{VMID: 7002, Type: "qemu", Status: "stopped", MemoryMiB: 1024, DiskGiB: 10},
+	}
+	resize := func(vmid, memory string) protocol.Change {
+		return protocol.Change{Op: OpResize, IDs: map[string]string{"vmid": vmid},
+			Requests: []protocol.Approved{{Method: "PUT", Path: setConfig.Path, Params: map[string][]string{"memory": {memory}}}}}
+	}
+	grow := func(vmid, size string) protocol.Change {
+		return protocol.Change{Op: OpGrow, IDs: map[string]string{"vmid": vmid},
+			Requests: []protocol.Approved{{Method: "PUT", Path: resizeDisk.Path, Params: map[string][]string{"size": {size}}}}}
+	}
+	create := createChange("7003", "lab", "2048", "20")
+	create.IDs["vmid"] = "7003"
+	for _, c := range []struct {
+		name    string
+		changes []protocol.Change
+		memory  int64
+		disk    int64
+		creates int
+	}{
+		{"create and its start, once", []protocol.Change{create, startChange("7003")}, 2048, 20, 1},
+		{"a running VM grows its memory by 1 GiB", []protocol.Change{resize("7001", "3072")}, 1024, 0, 0},
+		{"a running VM shrinks its memory", []protocol.Change{resize("7001", "1024")}, 0, 0, 0},
+		{"a stopped VM resized and started: its new memory", []protocol.Change{resize("7002", "4096"), startChange("7002")}, 4096, 0, 0},
+		{"a stopped VM resized, not started", []protocol.Change{resize("7002", "4096")}, 0, 0, 0},
+		{"a disk grown by 10 GiB", []protocol.Change{grow("7001", "20G")}, 0, 10, 0},
+		{"an unknown VM: at the asked size", []protocol.Change{resize("7999", "512")}, 512, 0, 0},
+	} {
+		n := NeedOf(c.changes, guests)
+		if n.MemoryMiB != c.memory || n.DiskGiB != c.disk || n.Creates != c.creates {
+			t.Errorf("%s: %+v, want %d MiB, %d GiB, %d creates", c.name, n, c.memory, c.disk, c.creates)
+		}
+	}
+}
+

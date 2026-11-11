@@ -84,6 +84,9 @@ type Guest struct {
 	Pool         string `json:"pool,omitempty"`
 	Uptime       int64  `json:"uptime,omitempty"`
 	ConfigDigest string `json:"configDigest,omitempty"` // empty when its node is offline
+	// What a VM's configuration gives it, to count what a start or a resize adds (0 when unknown).
+	MemoryMiB int64 `json:"memoryMiB,omitempty"`
+	DiskGiB   int64 `json:"diskGiB,omitempty"`
 }
 
 // Facts are what the guard decides from. Gathering is apart from checking, so that the checks are
@@ -162,13 +165,14 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 		}
 		g := Guest{VMID: r.VMID, Type: r.Type, Node: r.Node, Name: r.Name, Status: r.Status, Pool: r.Pool, Uptime: r.Uptime}
 		if online[g.Node] {
-			var cfg struct {
-				Digest string `json:"digest"`
-			}
+			var cfg vmConfig
 			if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: fmt.Sprintf("/nodes/%s/%s/%d/config", g.Node, g.Type, g.VMID)}, &cfg); err != nil {
 				return nil, err
 			}
 			g.ConfigDigest = cfg.Digest
+			if g.Type == "qemu" {
+				g.MemoryMiB, g.DiskGiB = cfg.Memory, cfg.DiskGiB
+			}
 		}
 		f.Guests = append(f.Guests, g)
 	}
@@ -212,34 +216,86 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 	return f, nil
 }
 
-// Need is what the changes of one apply need of the node and the storage: an upper bound (a
-// create counts its whole memory and disk, a resize its new memory, a grow its new disk).
+// Need is what the changes of one apply need of the node and the storage, VM by VM:
+//
+//   - a VM created and started: its memory and disk, once;
+//   - a stopped VM started: its memory (its new memory if it is resized too);
+//   - a running VM resized: what its memory grows by;
+//   - a disk grown: what it grows by.
+//
+// A VM the guard cannot read is counted at the size the change asks for (an upper bound).
 type Need struct {
 	Creates   int
 	MemoryMiB int64
 	DiskGiB   int64
 }
 
-// NeedOf sums the changes.
-func NeedOf(changes []protocol.Change) Need {
-	var n Need
+// NeedOf sums the changes, with what the guests' configurations say now.
+func NeedOf(changes []protocol.Change, guests []Guest) Need {
+	type vm struct {
+		created, started bool
+		memory, disk     int64 // asked by the changes (0: not changed)
+	}
+	byVMID := map[string]*vm{}
+	var order []string
 	for _, c := range changes {
-		if c.Op == OpCreate {
-			n.Creates++
+		id := c.IDs["vmid"]
+		v := byVMID[id]
+		if v == nil {
+			v = &vm{}
+			byVMID[id] = v
+			order = append(order, id)
 		}
+		v.created = v.created || c.Op == OpCreate
 		for _, r := range c.Requests {
 			switch r.Path {
+			case startVM.Path:
+				v.started = true
 			case createVM.Path, setConfig.Path:
-				if v := r.Params["memory"]; len(v) == 1 {
-					m, _ := strconv.ParseInt(v[0], 10, 64)
-					n.MemoryMiB += m
+				if x := r.Params["memory"]; len(x) == 1 {
+					v.memory, _ = strconv.ParseInt(x[0], 10, 64)
 				}
 			case resizeDisk.Path:
-				if v := r.Params["size"]; len(v) == 1 {
-					d, _ := strconv.ParseInt(strings.TrimSuffix(v[0], "G"), 10, 64)
-					n.DiskGiB += d
+				if x := r.Params["size"]; len(x) == 1 {
+					v.disk, _ = strconv.ParseInt(strings.TrimSuffix(x[0], "G"), 10, 64)
 				}
 			}
+		}
+	}
+	now := map[string]Guest{}
+	for _, g := range guests {
+		if g.Type == "qemu" {
+			now[strconv.FormatInt(g.VMID, 10)] = g
+		}
+	}
+	var n Need
+	for _, id := range order {
+		v := byVMID[id]
+		g, known := now[id]
+		switch {
+		case v.created:
+			n.Creates++
+			n.MemoryMiB += v.memory
+			n.DiskGiB += v.disk
+			continue
+		case !known:
+			n.MemoryMiB += v.memory
+			n.DiskGiB += v.disk
+			continue
+		}
+		running := g.Status == "running"
+		memory := g.MemoryMiB
+		if v.memory > 0 {
+			memory = v.memory
+		}
+		switch {
+		case !running && v.started:
+			n.MemoryMiB += memory
+		case running && v.memory > g.MemoryMiB:
+			n.MemoryMiB += v.memory - g.MemoryMiB
+		}
+		if v.disk > g.DiskGiB {
+			n.DiskGiB += v.disk - g.DiskGiB
 		}
 	}
 	return n
@@ -288,7 +344,7 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	}
 
 	// Room on the node and the storage.
-	n := NeedOf(changes)
+	n := NeedOf(changes, f.Guests)
 	left := (f.MemAvailable >> 20) - n.MemoryMiB
 	if left < s.MinHostMemAvailableMiB {
 		add("PVE-0201", block, "only %d MiB would remain available on %s after the changes' %d MiB (minimum %d MiB): free memory or lower min_host_mem_available_mib",
