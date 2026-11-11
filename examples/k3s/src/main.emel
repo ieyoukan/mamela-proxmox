@@ -9,6 +9,7 @@
 import Std.Console.{SystemConsole}
 import Mamela.{Static}
 import Proxmox.{Site, Vm}
+import K3s
 
 const K3S_VERSION = "v1.37.2+k3s1"
 const K3S_SHA256 = "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda"
@@ -43,12 +44,12 @@ fn infrastructure() -> Mamela.Graph {
     |> Proxmox.vm(site, server)
     |> Proxmox.vm(site, agent1)
     |> Proxmox.vm(site, agent2)
-    |> Mamela.k3s_server_on(s, K3S_VERSION, K3S_SHA256)
-    |> Mamela.k3s_agent_on(a1, s, K3S_VERSION, K3S_SHA256)
-    |> Mamela.k3s_agent_on(a2, s, K3S_VERSION, K3S_SHA256)
-    |> Mamela.service_on(s, "k3s", True, True)
-    |> Mamela.service_on(a1, "k3s", True, True)
-    |> Mamela.service_on(a2, "k3s", True, True)
+    |> K3s.server(s, K3S_VERSION, K3S_SHA256)
+    |> K3s.agent(a1, s, K3S_VERSION, K3S_SHA256)
+    |> K3s.agent(a2, s, K3S_VERSION, K3S_SHA256)
+    |> Mamela.service(s, "k3s", True, True)
+    |> Mamela.service(a1, "k3s", True, True)
+    |> Mamela.service(a2, "k3s", True, True)
 }
 
 fn main() {

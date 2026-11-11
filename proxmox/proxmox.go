@@ -100,6 +100,9 @@ type Spec struct {
 	DiskGiB      int64            `json:"diskGiB"`
 	Image        string           `json:"image"`
 	Network      protocol.Network `json:"network"`
+	// Template is the ProxmoxTemplate (by name) the VM is a linked clone of; none: the image is
+	// imported into the VM's own disk.
+	Template string `json:"template,omitempty"`
 }
 
 // State is what is observed of a declared VM.
@@ -111,6 +114,7 @@ type State struct {
 	Network   string `json:"network,omitempty"`
 	Tagged    bool   `json:"tagged,omitempty"`
 	Running   bool   `json:"running,omitempty"`
+	Seeded    bool   `json:"seeded,omitempty"` // its seed is attached
 	// For a VM that does not exist yet: the free VMIDs of its range, and whether its image is
 	// already on the image storage.
 	FreeVMIDs     []int64 `json:"freeVmids,omitempty"`
@@ -164,6 +168,13 @@ func (Provider) Manifest() protocol.Manifest {
 		"VM.Config.Network", "VM.Config.Options"),
 		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)...)
 	create = append(create, protocol.Need{Capability: "SDN.Use", Target: protocol.Target{Type: "proxmox-acl", Ref: "/sdn/zones/localnetwork/{bridge}"}, Always: true})
+	// A VM cloned from a template: VM.Clone on the template, VM.Config.CDROM for its seed.
+	create = append(create, pool("VM.Clone", "VM.Config.CDROM")...)
+	finishClone := append(pool("VM.Config.CPU", "VM.Config.Memory", "VM.Config.CDROM"),
+		storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)
+	template := append(pool("VM.Allocate", "VM.Audit", "VM.Config.Disk", "VM.Config.HWType", "VM.Config.Network", "VM.Config.Options"),
+		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)...)
+	template = append(template, protocol.Need{Capability: "SDN.Use", Target: protocol.Target{Type: "proxmox-acl", Ref: "/sdn/zones/localnetwork/{bridge}"}, Always: true})
 	reads := []protocol.Call{listVMs, getConfig, getStatus, listContent, getTask}
 	with := func(calls ...protocol.Call) []protocol.Call { return append(slices.Clone(reads), calls...) }
 	unsupported := func(op protocol.Op, why string) protocol.Operation {
@@ -176,7 +187,8 @@ func (Provider) Manifest() protocol.Manifest {
 		Guard:        &protocol.Guard{Calls: GuardCalls},
 		Scripts:      Scripts,
 		Kinds: []protocol.Kind{{Kind: Kind, Node: true, Operations: []protocol.Operation{
-			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, resizeDisk, setTags)},
+			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, cloneVM, configureNew, resizeDisk)},
+			{Op: OpFinishClone, Support: protocol.Supported, Needs: finishClone, Calls: with(upload, setupClone)},
 			{Op: OpStart, Support: protocol.Supported, Needs: pool("VM.PowerMgmt"), Calls: with(startVM)},
 			{Op: OpGrow, Support: protocol.Supported, Needs: append(pool("VM.Config.Disk"), storage("diskStorage", "Datastore.AllocateSpace")...), Calls: with(resizeDisk)},
 			{Op: OpResize, Support: protocol.Supported, Needs: pool("VM.Config.CPU", "VM.Config.Memory", "VM.PowerMgmt"), Calls: with(setSize, rebootVM)},
@@ -188,6 +200,11 @@ func (Provider) Manifest() protocol.Manifest {
 			{Op: OpReboot, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(rebootVM)},
 			{Op: OpReset, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(resetVM)},
 			{Op: OpAdopt, Support: protocol.Supported, Explicit: true, Adopts: true, Needs: pool("VM.Config.Options"), Calls: with(setMarker)},
+		}}, {Kind: KindTemplate, Operations: []protocol.Operation{
+			{Op: OpCreateTemplate, Support: protocol.Supported, Needs: template, Calls: with(upload, createTemplateVM, setTags, convertTemplate)},
+			{Op: OpFinishTemplate, Support: protocol.Supported, Needs: pool("VM.Allocate", "VM.Config.Options"), Calls: with(setTags, convertTemplate)},
+			unsupported(OpReplaceImage, "a template keeps its image: the Pome declares a template of the new image for the VMs of it"),
+			{Op: OpDeleteTemplate, Support: protocol.Supported, Explicit: true, Needs: pool("VM.Allocate"), Calls: with(deleteVM)},
 		}}},
 	}
 }
@@ -202,9 +219,11 @@ func (m marker) String() string {
 	return fmt.Sprintf("%s\nmamela-name: %s\nmamela-image: %s\nmamela-network: %s\n", Marker, m.Name, m.Image, m.Network)
 }
 
-func parseMarker(description string) (marker, bool) {
+func parseMarker(description string) (marker, bool) { return parseMarkerAfter(Marker, description) }
+
+func parseMarkerAfter(first, description string) (marker, bool) {
 	lines := strings.Split(strings.TrimSpace(description), "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != Marker {
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != first {
 		return marker{}, false
 	}
 	var m marker
@@ -248,7 +267,16 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 	}
 	var out protocol.ObserveResult
 	mine := map[int64]bool{}
+	cs := &configs{ctx: ctx, h: h, seen: map[int64]vmConfig{}}
 	for _, r := range in.Resources {
+		if r.Kind == KindTemplate {
+			o, err := observeTemplate(cs, r, vms, mine)
+			if err != nil {
+				return out, fmt.Errorf("%s: %w", r.ID, err)
+			}
+			out.Resources = append(out.Resources, o)
+			continue
+		}
 		s, err := spec(r.Spec)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", r.ID, err)
@@ -260,12 +288,13 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 			if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax {
 				continue
 			}
-			cfg, err := config(ctx, h, vm.Node, vmid)
+			cfg, err := cs.of(vm.Node, vmid)
 			if err != nil {
 				return out, err
 			}
 			if m, ok := parseMarker(cfg.Description); ok && m.Name == r.Name {
 				fill(&o, vm, cfg, m, s.Tag)
+				o.IDs["storage"] = s.ImageStorage // its seeds' storage
 				mine[vmid], found = true, true
 				break
 			}
@@ -278,7 +307,7 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 				if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax || mine[vmid] {
 					continue
 				}
-				cfg, err := config(ctx, h, vm.Node, vmid)
+				cfg, err := cs.of(vm.Node, vmid)
 				if err != nil {
 					return out, err
 				}
@@ -314,9 +343,17 @@ func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveP
 		if mine[vmid] || vm.Pool == "" {
 			continue
 		}
-		cfg, err := config(ctx, h, vm.Node, vmid)
+		cfg, err := cs.of(vm.Node, vmid)
 		if err != nil {
 			return out, err
+		}
+		if m, ok := parseTemplateMarker(cfg.Description); ok {
+			o := protocol.Observed{ID: string(KindTemplate) + " " + m.Name, Kind: KindTemplate, Name: m.Name}
+			if err := fillTemplate(cs, &o, vm, cfg, m, "", vms); err != nil {
+				return out, err
+			}
+			out.Resources = append(out.Resources, o)
+			continue
 		}
 		m, ok := parseMarker(cfg.Description)
 		if !ok {
@@ -340,7 +377,7 @@ func fill(o *protocol.Observed, vm resource, cfg vmConfig, m marker, tag string)
 		o.Node.UptimeSeconds = vm.Uptime
 	}
 	st := State{CPU: cfg.Cores, MemoryMiB: cfg.Memory, DiskGiB: cfg.DiskGiB, Image: m.Image, Network: m.Network,
-		Tagged: tagged, Running: running}
+		Tagged: tagged, Running: running, Seeded: cfg.IDE2 != ""}
 	o.State, _ = json.Marshal(st, json.Deterministic(true))
 }
 
@@ -375,6 +412,14 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 	taken := map[int64]bool{}
 	uploading := map[string]bool{} // images an earlier create of this diff uploads
 	for _, r := range desired {
+		if r.Kind == KindTemplate {
+			cs, err := diffTemplate(r, obs[r.ID], uploading)
+			if err != nil {
+				return out, fmt.Errorf("%s: %w", r.ID, err)
+			}
+			out.Changes = append(out.Changes, cs...)
+			continue
+		}
 		s, err := spec(r.Spec)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", r.ID, err)
@@ -399,14 +444,30 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 				return out, fmt.Errorf("%s: no free VMID in %d..%d", r.ID, s.VMIDMin, s.VMIDMax)
 			}
 			taken[vmid] = true
-			// An image is uploaded by one change only: another change that finds it on the storage
-			// could not tell whether it uploaded it (lookup must tell its own effect).
-			key := s.Node + "/" + s.ImageStorage + "/" + s.Image
-			if uploading[key] {
-				st.ImageUploaded = true
+			made := protocol.Change{}
+			if s.Template != "" {
+				t, ok := in.Dependencies[string(KindTemplate)+" "+s.Template]
+				if !ok || !t.Exists {
+					return out, fmt.Errorf("%s: its template %s is not among its dependencies (the Pome declares it; plan with a Proxmox Pome that does)", r.ID, s.Template)
+				}
+				var ts TemplateState
+				json.Unmarshal(t.State, &ts)
+				if ts.Image != s.Image || t.IDs["node"] != s.Node {
+					return out, fmt.Errorf("%s: template %s is of %s on %s, the VM is of %s on %s", r.ID, s.Template, ts.Image, t.IDs["node"], s.Image, s.Node)
+				}
+				tid, _ := strconv.ParseInt(t.IDs["vmid"], 10, 64)
+				made = cloneChange(r, s, vmid, tid)
+			} else {
+				// An image is uploaded by one change only: another change that finds it on the
+				// storage could not tell whether it uploaded it (lookup must tell its own effect).
+				key := s.Node + "/" + s.ImageStorage + "/" + s.Image
+				if uploading[key] {
+					st.ImageUploaded = true
+				}
+				uploading[key] = true
+				made = create(r, s, st, vmid)
 			}
-			uploading[key] = true
-			out.Changes = append(out.Changes, create(r, s, st, vmid), protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart,
+			out.Changes = append(out.Changes, made, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart,
 				IDs: ids(s.Node, vmid), Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}},
 				Reasons: []string{startReason}, Late: true})
 		case !o.Owned:
@@ -414,6 +475,9 @@ func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.Diff
 		default:
 			id := o.IDs
 			switch {
+			case !st.Seeded && s.Template != "":
+				// A clone interrupted before its seed and size: one change, on its configuration.
+				out.Changes = append(out.Changes, finishClone(r, s, o))
 			case st.DiskGiB < s.DiskGiB:
 				// One change at a time on the configuration: each needs the version it was planned on.
 				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpGrow, IDs: id, Precondition: o.Version,
@@ -531,7 +595,7 @@ func (p Provider) Apply(ctx context.Context, h *sdk.Host, in protocol.ApplyParam
 		if skip {
 			continue
 		}
-		path := strings.NewReplacer("{node}", node, "{vmid}", strconv.FormatInt(vmid, 10), "{storage}", c.IDs["storage"]).Replace(a.Path)
+		path := strings.NewReplacer("{node}", node, "{vmid}", strconv.FormatInt(vmid, 10), "{storage}", c.IDs["storage"], "{template}", c.IDs["template"]).Replace(a.Path)
 		req := protocol.HostRequest{Method: a.Method, Path: path, Form: params, Upload: a.Upload}
 		if a.Method == "DELETE" { // Proxmox reads a DELETE's parameters from the query
 			req.Form, req.Query = nil, params
@@ -573,7 +637,39 @@ func (p Provider) inEffect(ctx context.Context, h *sdk.Host, node, storage strin
 		if m, ok := parseMarker(cfg.Description); ok && m.Name == params["name"][0] {
 			return true, nil // an earlier apply created it
 		}
+		if m, ok := parseTemplateMarker(cfg.Description); ok && m.Name == params["name"][0] {
+			return true, nil // an earlier apply created the template
+		}
 		return false, fmt.Errorf("VMID %d is taken by a VM this provider did not create; plan again", vmid)
+	case a.Path == cloneVM.Path:
+		vms, err := list(ctx, h)
+		if err != nil {
+			return false, err
+		}
+		vm, exists := vms[vmid]
+		if !exists {
+			return false, nil
+		}
+		cfg, err := config(ctx, h, vm.Node, vmid)
+		if err != nil {
+			return false, err
+		}
+		if m, ok := parseMarker(cfg.Description); ok && m.Name == params["name"][0] {
+			return true, nil // an earlier apply cloned it
+		}
+		return false, fmt.Errorf("VMID %d is taken by a VM this provider did not create; plan again", vmid)
+	case a.Path == convertTemplate.Path:
+		cfg, err := config(ctx, h, node, vmid)
+		if err != nil {
+			return false, err
+		}
+		return cfg.Template, nil
+	case a.Path == setConfig.Path && params["ide2"] != nil:
+		cfg, err := config(ctx, h, node, vmid)
+		if err != nil {
+			return false, err
+		}
+		return cfg.IDE2 != "" && strconv.FormatInt(cfg.Memory, 10) == params["memory"][0] && strconv.FormatInt(cfg.Cores, 10) == params["cores"][0], nil
 	case a.Path == resizeDisk.Path && params["digest"] == nil:
 		cfg, err := config(ctx, h, node, vmid)
 		if err != nil {
@@ -652,7 +748,7 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 	if !exists {
 		// Not created; the uploads before the create may have landed (an image, the seed: Mamela
 		// names seeds mamela-seed-<node>-<vmid>-...).
-		if c.Op == OpCreate {
+		if c.Op == OpCreate || c.Op == OpCreateTemplate {
 			for _, a := range c.Artifacts {
 				content, prefix := "iso", fmt.Sprintf("mamela-seed-%s-%d", a.Node, a.NodeID)
 				if a.Kind == protocol.ArtifactDownload {
@@ -673,7 +769,9 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 	if err != nil {
 		return protocol.LookupResult{}, err
 	}
-	if _, ok := parseMarker(cfg.Description); !ok {
+	_, vmMarked := parseMarker(cfg.Description)
+	_, templateMarked := parseTemplateMarker(cfg.Description)
+	if !vmMarked && !templateMarked {
 		return protocol.LookupResult{Status: protocol.LookupNotDone}, nil
 	}
 	want, got := 0, 0
@@ -685,8 +783,10 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 	}
 	for _, a := range c.Requests {
 		switch a.Path {
-		case createVM.Path:
+		case createVM.Path, cloneVM.Path:
 			check(true)
+		case convertTemplate.Path:
+			check(cfg.Template)
 		case resizeDisk.Path:
 			n, _ := strconv.ParseInt(strings.TrimSuffix(a.Params["size"][0], "G"), 10, 64)
 			check(cfg.DiskGiB >= n)
@@ -700,6 +800,9 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 			if v := a.Params["memory"]; v != nil {
 				check(strconv.FormatInt(cfg.Memory, 10) == v[0])
 			}
+			if v := a.Params["ide2"]; v != nil {
+				check(cfg.IDE2 != "")
+			}
 		case startVM.Path:
 			check(vm.Status == "running")
 		}
@@ -707,7 +810,7 @@ func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupPar
 	switch {
 	case got == want:
 		return protocol.LookupResult{Status: protocol.LookupDone}, nil
-	case got == 0 && c.Op != OpCreate:
+	case got == 0 && c.Op != OpCreate && c.Op != OpCreateTemplate:
 		return protocol.LookupResult{Status: protocol.LookupNotDone}, nil
 	}
 	return protocol.LookupResult{Status: protocol.LookupPartly}, nil
@@ -745,6 +848,8 @@ type vmConfig struct {
 	Memory      int64
 	DiskGiB     int64
 	Tags        []string
+	Template    bool   // a template
+	SCSI0, IDE2 string // the disk (a linked clone's names its template's base disk) and the seed
 }
 
 // UnmarshalJSON reads what it needs of a VM's configuration: numbers may come as strings.
@@ -770,6 +875,8 @@ func (c *vmConfig) UnmarshalJSON(b []byte) error {
 		c.Cores = 1 // the Proxmox default
 	}
 	c.DiskGiB = diskBytes(text("scsi0")) >> 30
+	c.SCSI0, c.IDE2 = text("scsi0"), text("ide2")
+	c.Template = text("template") == "1"
 
 	for _, t := range strings.FieldsFunc(text("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
 		c.Tags = append(c.Tags, t)

@@ -74,7 +74,20 @@ func (Provider) Prepare(_ context.Context, in protocol.PrepareParams) (protocol.
 		}
 	}
 	vmid := o.IDs["vmid"]
-	c := protocol.Change{Resource: o.ID, Kind: Kind, Op: in.Op, IDs: map[string]string{"node": o.IDs["node"], "vmid": vmid}}
+	c := protocol.Change{Resource: o.ID, Kind: o.Kind, Op: in.Op, IDs: map[string]string{"node": o.IDs["node"], "vmid": vmid}}
+	if o.Kind == KindTemplate {
+		var ts TemplateState
+		json.Unmarshal(o.State, &ts)
+		switch {
+		case in.Op != OpDeleteTemplate:
+			return protocol.PrepareResult{}, fmt.Errorf("%s is not an explicit operation of a template (it has: %s)", in.Op, OpDeleteTemplate)
+		case len(ts.Clones) > 0:
+			return protocol.PrepareResult{}, fmt.Errorf("%s: VMs %v are linked clones of template %s: delete them first (delete-vm)", o.ID, ts.Clones, vmid)
+		}
+		c.Requests = []protocol.Approved{{Method: deleteVM.Method, Path: deleteVM.Path, Params: map[string][]string{"destroy-unreferenced-disks": {"1"}}}}
+		c.Reasons = []string{fmt.Sprintf("delete template %s (%s) and its disk: no VM is cloned from it", vmid, o.Name)}
+		return protocol.PrepareResult{Change: c}, nil
+	}
 	req := func(call protocol.Call, params map[string][]string) protocol.Approved {
 		return protocol.Approved{Method: call.Method, Path: call.Path, Params: params}
 	}
@@ -114,8 +127,19 @@ func (Provider) Prepare(_ context.Context, in protocol.PrepareParams) (protocol.
 	return protocol.PrepareResult{Change: c}, nil
 }
 
-// nameOf is the declared name in a resource ID ("ProxmoxVM web").
-func nameOf(id string) string { return strings.TrimPrefix(id, string(Kind)+" ") }
+// nameOf is the declared name in a resource ID ("ProxmoxVM web", "ProxmoxTemplate ubuntu-24.04-pve1").
+func nameOf(id string) string {
+	_, name, _ := strings.Cut(id, " ")
+	return name
+}
+
+// markerOf reads the marker of the kind a change is for.
+func markerOf(k protocol.ResourceKind, description string) (marker, bool) {
+	if k == KindTemplate {
+		return parseTemplateMarker(description)
+	}
+	return parseMarker(description)
+}
 
 // ensureOwn refuses to act on a VMID that is not, or no longer, the VM the change was prepared for:
 // the VM there must carry this provider's marker with the change's name (or, to adopt it, the old
@@ -125,7 +149,7 @@ func ensureOwn(ctx context.Context, h *sdk.Host, c protocol.Change, node string,
 	if err != nil {
 		return err
 	}
-	m, ok := parseMarker(cfg.Description)
+	m, ok := markerOf(c.Kind, cfg.Description)
 	if c.Op == OpAdopt {
 		m, ok = parseOldMarker(cfg.Description)
 	}
@@ -148,10 +172,10 @@ func lookupExplicit(ctx context.Context, h *sdk.Host, c protocol.Change, node st
 			return "", err
 		}
 	}
-	m, mine := parseMarker(cfg.Description)
+	m, mine := markerOf(c.Kind, cfg.Description)
 	mine = exists && mine && m.Name == nameOf(c.Resource)
 	switch c.Op {
-	case OpDelete:
+	case OpDelete, OpDeleteTemplate:
 		switch {
 		case !mine:
 			return protocol.LookupDone, nil // gone (or the VMID was taken again by another VM)
@@ -182,5 +206,5 @@ func lookupExplicit(ctx context.Context, h *sdk.Host, c protocol.Change, node st
 }
 
 func explicit(op protocol.Op) bool {
-	return op == OpDelete || op == OpReboot || op == OpReset || op == OpAdopt
+	return op == OpDelete || op == OpReboot || op == OpReset || op == OpAdopt || op == OpDeleteTemplate
 }

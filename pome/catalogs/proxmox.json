@@ -141,6 +141,7 @@
         "memory",
         "tags",
         "description",
+        "ide2",
         "digest"
       ],
       "precondition": "digest",
@@ -155,6 +156,31 @@
           "name": "memoryMiB",
           "format": "count"
         }
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/template",
+      "effect": "change"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{template}/clone",
+      "effect": "create",
+      "form": [
+        "newid",
+        "name",
+        "pool",
+        "full",
+        "description"
+      ],
+      "values": {
+        "full": [
+          "0"
+        ]
+      },
+      "bind": [
+        "newid"
       ]
     },
     {

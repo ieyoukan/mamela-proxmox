@@ -24,6 +24,19 @@ func vm(name, rest string) protocol.Resource {
 	return protocol.Resource{ID: "ProxmoxVM " + name, Kind: "ProxmoxVM", Name: name, Spec: []byte(`{` + site + `,` + rest + `}`)}
 }
 
+// template is the template of the image on the cases' site, as the Pome declares it.
+func template(name string) protocol.Resource {
+	return protocol.Resource{ID: "ProxmoxTemplate " + name, Kind: "ProxmoxTemplate", Name: name,
+		Spec: []byte(`{` + site + `,"image":"ubuntu-24.04"}`)}
+}
+
+// clone is a VM cloned from the template.
+func clone(name, rest string) protocol.Resource {
+	r := vm(name, rest+`,"template":"ubuntu-24.04-pve1"`)
+	r.After = []string{"ProxmoxTemplate ubuntu-24.04-pve1"}
+	return r
+}
+
 // guardSettings are the guard's settings for the fake cluster, with the boundary of the cases.
 var guardSettings = []byte(`{"node":"pve1","pool":"lab","vmid_min":7000,"vmid_max":7009,"tag":"mamela-lab","disk_storage":"local-lvm",` +
 	`"image_storage":"local","bridge":"vmbr0","operating_token":"mamela@pve!lab","max_vms":4,` +
@@ -81,6 +94,13 @@ func TestConformance(t *testing.T) {
 			{Name: "two-vms-static", Desired: []protocol.Resource{
 				vm("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
 				vm("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)}},
+			// VMs as linked clones of a template made once: the template first, then the clones;
+			// deleting them, then the template.
+			{Name: "cloned", Desired: []protocol.Resource{template("ubuntu-24.04-pve1"),
+				clone("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
+				clone("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpDelete, Resource: "ProxmoxVM a"}, {Op: proxmox.OpDelete, Resource: "ProxmoxVM b"},
+					{Op: proxmox.OpDeleteTemplate, Resource: "ProxmoxTemplate ubuntu-24.04-pve1"}}},
 		},
 	})
 }

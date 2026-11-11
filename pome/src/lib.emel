@@ -3,19 +3,25 @@
 ## Proxmox only through Mamela, which holds the token, checks every request and makes the files a
 ## VM is created from: the pinned cloud image and the VM's mamelet seed.
 ##
-## A VM is a node: declare packages, services and k3s on `Proxmox.node(vm)` with
-## `Mamela.package_on` and the other `*_on` functions.
+## A VM is a node: declare packages and services on `Proxmox.node(vm)` with `Mamela.package` and
+## `Mamela.service`, and k3s with the K3s Pome.
+##
+## A VM is a linked clone of a template of its image: `Proxmox.vm` declares the template too (the
+## same way for every VM of the image on the node, which Mamela takes as one resource). Mamela makes
+## the template once, from the pinned image, and each VM from it in seconds; the template is deleted
+## only by the explicit `delete-template`, once no VM is cloned from it.
 
 import Mamela
-import Mamela.{Network, Dhcp, Static}
-import Dynamic.{Dynamic, Text, Items}
+import Mamela.{Network, Ref}
+import Dynamic.{Dynamic, Text}
 import Dynamic.Number
 
 ## The provider, as its manifest names it.
 pub const PROVIDER = "proxmox"
 
-## The resource kind.
+## The resource kinds.
 pub const KIND = "ProxmoxVM"
+pub const TEMPLATE_KIND = "ProxmoxTemplate"
 
 ## Where VMs go on the cluster: the Proxmox node, the pool the token may change, the storages for
 ## disks and for images and seeds, the bridge, the tag Mamela puts on them, and the VMIDs it may
@@ -39,24 +45,34 @@ fn int(n: Int) -> Dynamic {
   Dynamic.Number(Number.from_int(n))
 }
 
-fn network_json(n: Network) -> Dynamic {
-  n match {
-    Dhcp -> Dynamic.object([("mode", Text("dhcp"))])
-    Static(address: address, gateway: gateway, dns: dns) -> {
-      Dynamic.object(
-        [
-          ("mode", Text("static")),
-          ("address", Text(address)),
-          ("gateway", Text(gateway)),
-          ("dns", Items(dns.map(Text))),
-        ],
-      )
-    }
-  }
+fn site_spec(site: Site) -> List[(String, Dynamic)] {
+  [
+    ("node", Text(site.node)),
+    ("pool", Text(site.pool)),
+    ("diskStorage", Text(site.disk_storage)),
+    ("imageStorage", Text(site.image_storage)),
+    ("bridge", Text(site.bridge)),
+    ("tag", Text(site.tag)),
+    ("vmidMin", int(site.vmid_min)),
+    ("vmidMax", int(site.vmid_max)),
+  ]
 }
 
-## Declares the VM on the site.
+## The name of the template of an image on the site's node ("ubuntu-24.04-pve1").
+pub fn template_name(site: Site, image: String) -> String {
+  "#{image}-#{site.node}"
+}
+
+## Declares the VM on the site, and the template of its image it is cloned from.
 pub fn vm(graph: Mamela.Graph, site: Site, vm: Vm) -> Mamela.Graph {
+  template = template_name(site, vm.image)
+  with_template = Mamela.provided(
+    graph,
+    PROVIDER,
+    TEMPLATE_KIND,
+    template,
+    List.append(site_spec(site), [("image", Text(vm.image))]),
+  )
   spec = [
     ("node", Text(site.node)),
     ("pool", Text(site.pool)),
@@ -70,9 +86,17 @@ pub fn vm(graph: Mamela.Graph, site: Site, vm: Vm) -> Mamela.Graph {
     ("memoryMiB", int(vm.memory_mib)),
     ("diskGiB", int(vm.disk_gib)),
     ("image", Text(vm.image)),
-    ("network", network_json(vm.network)),
+    ("network", Mamela.network_spec(vm.network)),
+    ("template", Text(template)),
   ]
-  Mamela.provided(graph, PROVIDER, KIND, vm.name, spec)
+  Mamela.provided_after(
+    with_template,
+    PROVIDER,
+    KIND,
+    vm.name,
+    spec,
+    [Ref(kind: TEMPLATE_KIND, name: template)],
+  )
 }
 
 ## The VM as a node, for packages, services and k3s on it.

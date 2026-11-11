@@ -51,6 +51,9 @@ var Catalog = map[string][]Privilege{
 	"POST /nodes/{node}/qemu/{vmid}/status/reset":  {at(AtPool, "reset a VM", "VM.PowerMgmt")},
 	"POST /nodes/{node}/qemu/{vmid}/status/stop":   {at(AtPool, "stop a VM before deleting it", "VM.PowerMgmt")},
 	"DELETE /nodes/{node}/qemu/{vmid}":             {at(AtPool, "delete a VM and its disks", "VM.Allocate")},
+	"POST /nodes/{node}/qemu/{vmid}/template":      {at(AtPool, "convert a VM to a template", "VM.Allocate")},
+	"POST /nodes/{node}/qemu/{template}/clone": {at(AtPool, "clone the template (in the pool)", "VM.Clone"),
+		at(AtPool, "make the clone in the pool", "VM.Allocate"), at(AtDiskStorage, "the clone's disk", "Datastore.AllocateSpace")},
 }
 
 // CreateParams are the privileges of each parameter of POST /nodes/{node}/qemu, checked with the
@@ -83,6 +86,7 @@ var ConfigParams = map[string][]Privilege{
 	"tags":        {at(AtPool, "tag the VM (once it is in the pool)", "VM.Config.Options")},
 	"cores":       {at(AtPool, "change the vCPUs", "VM.Config.CPU")},
 	"memory":      {at(AtPool, "change the memory", "VM.Config.Memory")},
+	"ide2":        {at(AtPool, "attach a clone's seed", "VM.Config.CDROM"), at(AtImageStorage, "the seed ISO (check_volume_access)", "Datastore.Audit", "Datastore.AllocateSpace")},
 }
 
 // PrivilegesOf is every privilege a call needs, with the parameters it may send. ok is false for a

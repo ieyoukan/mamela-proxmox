@@ -30,8 +30,8 @@ fn infrastructure() -> Mamela.Graph {
 
   Mamela.empty()
     |> Proxmox.vm(site, web)
-    |> Mamela.package_on(Proxmox.node(web), "nginx")
-    |> Mamela.service_on(Proxmox.node(web), "nginx", True, True)
+    |> Mamela.package(Proxmox.node(web), "nginx")
+    |> Mamela.service(Proxmox.node(web), "nginx", True, True)
 }
 
 fn main() {

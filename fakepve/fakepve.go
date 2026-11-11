@@ -34,6 +34,9 @@ type VM struct {
 	Uptime      int64             // seconds, while running (120 when 0)
 	Config      map[string]string // other parameters, as created
 	Serial      int               // bumped on every change; the digest is derived from it
+	Template    bool              // converted to a template
+	Base        int64             // the template it is a linked clone of
+	IDE2        string            // the seed's drive
 }
 
 func (v VM) digest() string {
@@ -97,6 +100,14 @@ func reply(w http.ResponseWriter, status int, data any) {
 
 // diskOption writes the size as Proxmox does: in MiB after an import (3.5 GiB), in GiB once resized.
 func diskOption(v *VM) string {
+	switch {
+	case v.Template:
+		return fmt.Sprintf("local-lvm:base-%d-disk-0,discard=on,size=3584M", v.VMID)
+	case v.Base != 0 && v.DiskGiB == 3:
+		return fmt.Sprintf("local-lvm:base-%d-disk-0/vm-%d-disk-0,discard=on,size=3584M", v.Base, v.VMID)
+	case v.Base != 0:
+		return fmt.Sprintf("local-lvm:base-%d-disk-0/vm-%d-disk-0,discard=on,size=%dG", v.Base, v.VMID, v.DiskGiB)
+	}
 	if v.DiskGiB == 3 {
 		return fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=3584M", v.VMID)
 	}
@@ -178,6 +189,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if v.Tags != "" {
 				cfg["tags"] = v.Tags
 			}
+			if v.Template {
+				cfg["template"] = 1
+			}
+			if v.IDE2 != "" {
+				cfg["ide2"] = v.IDE2
+			}
 			reply(w, 200, cfg)
 		}
 	})
@@ -243,7 +260,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, 500, "no image "+from)
 			return
 		}
-		if _, ok := s.volumes[seed]; !ok {
+		if _, ok := s.volumes[seed]; !ok && seed != "" {
 			reply(w, 500, "no seed "+seed)
 			return
 		}
@@ -254,8 +271,44 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			cfg[k] = r.PostForm.Get(k)
 		}
 		s.vms[id] = &VM{VMID: id, Name: r.PostForm.Get("name"), Node: r.PathValue("node"), Pool: r.PostForm.Get("pool"),
-			Description: r.PostForm.Get("description"), Cores: cores, Memory: mem, DiskGiB: 3, Config: cfg}
+			Description: r.PostForm.Get("description"), Cores: cores, Memory: mem, DiskGiB: 3, Config: cfg, IDE2: r.PostForm.Get("ide2")}
 		reply(w, 200, upid(r.PathValue("node"), "qmcreate", id))
+	})
+	// A template: a stopped VM converted once; a linked clone: a new VM on its base disk.
+	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/template", func(w http.ResponseWriter, r *http.Request) {
+		if v := vm(w, r); v != nil {
+			if v.Running {
+				reply(w, 500, "you can't convert a running VM to a template")
+				return
+			}
+			v.Template = true
+			v.Serial++
+			reply(w, 200, nil)
+		}
+	})
+	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/clone", func(w http.ResponseWriter, r *http.Request) {
+		src := vm(w, r)
+		if src == nil {
+			return
+		}
+		r.ParseForm()
+		id, _ := strconv.ParseInt(r.PostForm.Get("newid"), 10, 64)
+		switch {
+		case !src.Template || r.PostForm.Get("full") != "0":
+			reply(w, 500, "linked clone feature is only available for templates")
+			return
+		case id == 0:
+			reply(w, 400, "newid is required")
+			return
+		}
+		if _, exists := s.vms[id]; exists {
+			reply(w, 500, "VM already exists")
+			return
+		}
+		s.vms[id] = &VM{VMID: id, Name: r.PostForm.Get("name"), Node: src.Node, Pool: r.PostForm.Get("pool"),
+			Description: r.PostForm.Get("description"), Cores: src.Cores, Memory: src.Memory, DiskGiB: 3, Base: src.VMID,
+			Config: map[string]string{"net0": src.Config["net0"]}}
+		reply(w, 200, upid(src.Node, "qmclone", src.VMID))
 	})
 	changed := func(w http.ResponseWriter, r *http.Request, v *VM) bool {
 		r.ParseForm()
@@ -296,11 +349,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if d, ok := r.PostForm["description"]; ok {
 			v.Description = d[0]
 		}
+		if d := r.PostForm.Get("ide2"); d != "" {
+			seed, _, _ := strings.Cut(d, ",")
+			if _, ok := s.volumes[seed]; !ok {
+				reply(w, 500, "no seed "+seed)
+				return
+			}
+			v.IDE2 = d
+		}
 		v.Serial++
 		reply(w, 200, nil)
 	})
 	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/start", func(w http.ResponseWriter, r *http.Request) {
 		if v := vm(w, r); v != nil {
+			if v.Template {
+				reply(w, 500, "you can't start a vm if it's a template")
+				return
+			}
 			v.Running = true
 			reply(w, 200, upid(v.Node, "qmstart", v.VMID))
 		}
@@ -335,6 +400,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("destroy-unreferenced-disks") != "1" || r.ContentLength > 0 {
 				reply(w, 400, "destroy-unreferenced-disks=1 is expected in the query")
 				return
+			}
+			for _, other := range s.vms {
+				if other.Base == v.VMID {
+					reply(w, 500, fmt.Sprintf("base volume of template %d is used by linked clone %d", v.VMID, other.VMID))
+					return
+				}
 			}
 			delete(s.vms, v.VMID)
 			reply(w, 200, upid(v.Node, "qmdestroy", v.VMID))

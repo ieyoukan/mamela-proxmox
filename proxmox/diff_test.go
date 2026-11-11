@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ieyoukan/mamela/provider/protocol"
@@ -95,5 +96,24 @@ func TestStartIsTheSameChangeEitherWay(t *testing.T) {
 	b, _ := json.Marshal(later.Changes[0], json.Deterministic(true))
 	if string(a) != string(b) || !later.Changes[0].Late {
 		t.Errorf("the starts differ:\n%s\n%s", a, b)
+	}
+}
+
+// A template is never deleted while a VM is a linked clone of it: delete-template refuses, and
+// says which VMs to delete first.
+func TestDeleteTemplateWithClonesIsRefused(t *testing.T) {
+	o := protocol.Observed{ID: "ProxmoxTemplate ubuntu-24.04-pve1", Kind: KindTemplate, Name: "ubuntu-24.04-pve1", Exists: true, Owned: true,
+		IDs: map[string]string{"node": "pve1", "vmid": "7009"}, State: []byte(`{"image":"ubuntu-24.04","template":true,"tagged":true,"clones":[7001]}`)}
+	if _, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpDeleteTemplate, Observed: o}); err == nil ||
+		!strings.Contains(err.Error(), "7001") {
+		t.Fatalf("a template with a clone: %v", err)
+	}
+	o.State = []byte(`{"image":"ubuntu-24.04","template":true,"tagged":true}`)
+	r, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpDeleteTemplate, Observed: o})
+	if err != nil || len(r.Change.Requests) != 1 || r.Change.Requests[0].Method != "DELETE" {
+		t.Fatalf("a template without clones: %+v %v", r.Change, err)
+	}
+	if _, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpReboot, Observed: o}); err == nil {
+		t.Error("a template is rebooted")
 	}
 }

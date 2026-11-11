@@ -246,7 +246,7 @@ func NeedOf(changes []protocol.Change, guests []Guest) Need {
 			byVMID[id] = v
 			order = append(order, id)
 		}
-		v.created = v.created || c.Op == OpCreate
+		v.created = v.created || c.Op == OpCreate || c.Op == OpCreateTemplate
 		for _, r := range c.Requests {
 			switch r.Path {
 			case startVM.Path:
@@ -437,6 +437,22 @@ func Outside(s GuardSettings, c protocol.Change) []string {
 		case setConfig.Path:
 			if v, ok := param(r, "tags"); ok && v != s.Tag {
 				out = append(out, fmt.Sprintf("tag %q is not %s", v, s.Tag))
+			}
+			if v, ok := param(r, "ide2"); ok && !strings.HasPrefix(v, s.ImageStorage+":") {
+				out = append(out, fmt.Sprintf("seed %q is not on %s", v, s.ImageStorage))
+			}
+		case cloneVM.Path:
+			if v, _ := param(r, "pool"); v != s.Pool {
+				out = append(out, fmt.Sprintf("pool %q is not %s", v, s.Pool))
+			}
+			if v, _ := param(r, "newid"); v != c.IDs["vmid"] {
+				out = append(out, fmt.Sprintf("the clone's VMID %q is not the change's %s", v, c.IDs["vmid"]))
+			}
+			if v, _ := param(r, "full"); v != "0" {
+				out = append(out, "a clone is linked (full=0)")
+			}
+			if t, err := strconv.ParseInt(c.IDs["template"], 10, 64); err != nil || !s.inRange(t) {
+				out = append(out, fmt.Sprintf("template %q is not in %d..%d", c.IDs["template"], s.VMIDMin, s.VMIDMax))
 			}
 		}
 	}

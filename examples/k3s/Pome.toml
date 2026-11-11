@@ -7,8 +7,12 @@ emela = "0.27.0"
 target = "wasm"
 
 [dependencies]
-"github.com/ieyoukan/mamela/pome/mamela" = "v0.2.0"
+"github.com/ieyoukan/mamela/pome/mamela" = "v0.3.0"
+"github.com/ieyoukan/mamela/pome/k3s" = "v0.1.0"
 "github.com/ieyoukan/mamela-proxmox/pome" = "v0.1.0"
 
 [replace]
 "github.com/ieyoukan/mamela-proxmox/pome" = { path = "../../pome" }
+# Until the Pomes are published: a checkout of github.com/ieyoukan/mamela next to this one.
+"github.com/ieyoukan/mamela/pome/mamela" = { path = "../../../mamela/pome/mamela" }
+"github.com/ieyoukan/mamela/pome/k3s" = { path = "../../../mamela/pome/k3s" }

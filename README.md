@@ -18,7 +18,10 @@ Proxmox の安全装置（guard、明示操作、root 用のスクリプト）�
 
 | 操作 | 内容 |
 |---|---|
-| `create-vm` | イメージと seed をアップロードして、VM を作る（止まったまま。マーカーとタグを付ける） |
+| `create-template` | イメージから VM を一度だけ作り、テンプレートにする（タグとマーカーを付ける。VMID は範囲の上から） |
+| `finish-template` | 中断された作成の、タグ付けとテンプレートへの変換の続き |
+| `create-vm` | seed をアップロードし、テンプレートの linked clone として VM を作る（数秒。止まったまま。サイズ・seed・ディスク・タグを設定する）。テンプレートを使わない宣言では、イメージを VM のディスクに取り込む |
+| `finish-clone` | 中断された複製の、seed とサイズの設定の続き |
 | `start-vm` | 起動する（同じ実行のすべての VM を作った後） |
 | `grow-vm-disk` | ディスクを大きくする |
 | `resize-vm` | vCPU とメモリを変える（動いていれば再起動する） |
@@ -30,7 +33,17 @@ Proxmox の安全装置（guard、明示操作、root 用のスクリプト）�
 - イメージの変更
 - ネットワークの変更
 
-マーカーのない VM には触れません。宣言を消しても、VM は消しません。
+マーカーのない VM には触れません。宣言を消しても、VM もテンプレートも消しません。
+
+### テンプレート
+
+イメージを VM ごとに取り込むと、遅いディスクでは 1 台に 15〜20 分かかります。そのため VM は、イメージのテンプレートの linked clone にします。LVM-thin のスナップショットなので、数秒でできます。
+
+- **宣言:** `Proxmox.vm` は、VM の複製元のテンプレート（`ProxmoxTemplate <image>-<node>`）も宣言します。同じイメージとノードの VM がいくつあっても、Mamela は同じ宣言を 1 つのリソースとみなします。VM は、テンプレートができあがるまで待ちます。
+- **作る:** Mamela は、テンプレートを最初の plan で一度だけ作ります。pool・VMID の範囲（上から）・タグの中に置き、マーカーを付けます。テンプレートは起動しません。
+- **消す:** 明示操作 `delete-template` だけです。そのテンプレートの linked clone の VM が 1 台でもあれば拒みます。
+- **イメージの更新:** イメージの版を上げると、新しいテンプレートを宣言することになります。古いテンプレートは、使う VM がなくなってから消します。
+- **要る権限:** 操作用 Token に、`VM.Clone`（テンプレートの複製）と `VM.Config.CDROM`（複製した VM に seed を付ける）が足されます。bootstrap を root でもう一度実行するまで、guard の PVE-0102 が止めます。
 
 ### 明示操作
 
@@ -42,6 +55,7 @@ plan には入らず、人が名前を打ち直したときだけ行う操作で
 | `reboot-vm` | ゲストに再起動を頼む（ACPI） |
 | `reset-vm` | すぐに再起動する（リセットボタンと同じ。応答しないゲスト向け） |
 | `adopt-vm` | Mamela の旧組み込みプロバイダーが作った VM を引き継ぐ（このプロバイダーのマーカーとタグを書く） |
+| `delete-template` | テンプレートとそのディスクを消す（linked clone の VM が残っていれば拒む） |
 
 送る直前に、VMID の VM がまだその名前のマーカーを持つことを確かめます。違えば何も送りません。
 
@@ -81,8 +95,8 @@ web = Proxmox.Vm(name: "web", cpu: 2, memory_mib: 2048, disk_gib: 20, image: "ub
 
 Mamela.empty()
   |> Proxmox.vm(site, web)
-  |> Mamela.package_on(Proxmox.node(web), "nginx")
-  |> Mamela.service_on(Proxmox.node(web), "nginx", True, True)
+  |> Mamela.package(Proxmox.node(web), "nginx")
+  |> Mamela.service(Proxmox.node(web), "nginx", True, True)
 ```
 
 `mamela.providers.toml` に、API の場所と Token を書きます。カタログは、この Pome が同梱するもの（`pome/catalogs/proxmox.json`）を名前で選びます。Mamela は、プログラムのすべての要求をこのカタログで分類します（Mamela の ADR 0008）。中身は `mamela provider catalog pome` で読めます。

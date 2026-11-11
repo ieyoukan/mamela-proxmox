@@ -60,9 +60,16 @@ var Proxmox = protocol.Catalog{API: "proxmox", Entries: []protocol.Entry{
 			{Param: "memory", Name: protocol.MeasureMemoryMiB, Format: protocol.FormatCount},
 			{Param: "scsi0", Name: protocol.MeasureDiskGiB, Format: protocol.FormatDrive}}},
 	{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/config", Effect: protocol.EffectChange,
-		Form: []string{"cores", "memory", "tags", "description", "digest"}, Precondition: "digest",
+		Form: []string{"cores", "memory", "tags", "description", "ide2", "digest"}, Precondition: "digest",
 		Measures: []protocol.Measure{{Param: "cores", Name: protocol.MeasureCPU, Format: protocol.FormatCount},
 			{Param: "memory", Name: protocol.MeasureMemoryMiB, Format: protocol.FormatCount}}},
+	// A template is a VM converted once (its disk becomes a base the clones share); a linked clone
+	// is a new VM whose disk is a thin snapshot of the template's. The clone's VMID is the change's
+	// (bind), and only linked clones are made (full=0).
+	{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/template", Effect: protocol.EffectChange},
+	{Method: "POST", Path: "/nodes/{node}/qemu/{template}/clone", Effect: protocol.EffectCreate,
+		Form: []string{"newid", "name", "pool", "full", "description"}, Bind: []string{"newid"},
+		Values: map[string][]string{"full": {"0"}}},
 	// Growing a disk keeps its data (Proxmox never shrinks one).
 	{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/resize", Effect: protocol.EffectChange,
 		Form: []string{"disk", "size", "digest"}, Precondition: "digest",
