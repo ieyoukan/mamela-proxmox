@@ -141,17 +141,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		mr := multipart.NewReader(r.Body, params["boundary"])
 		form := map[string]string{}
 		var name, content string
+		var order []string
 		for {
 			p, err := mr.NextPart()
 			if err != nil {
 				break
 			}
 			b, _ := io.ReadAll(p)
+			order = append(order, p.FormName())
 			if p.FormName() == "filename" {
 				name, content = p.FileName(), string(b)
 			} else {
 				form[p.FormName()] = string(b)
 			}
+		}
+		// pveproxy reads these fields in this order, then the file; anything else is a bad request.
+		if strings.Join(order, ",") != "content,checksum-algorithm,checksum,filename" {
+			reply(w, 400, "fields out of order: "+strings.Join(order, ","))
+			return
 		}
 		sum := sha256.Sum256([]byte(content))
 		if name == "" || form["checksum-algorithm"] != "sha256" || (form["checksum"] != hex.EncodeToString(sum[:]) && !strings.HasPrefix(content, "fake ")) {
