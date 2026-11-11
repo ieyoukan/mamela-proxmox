@@ -33,6 +33,14 @@
 
 ## 使い方
 
+宣言の Pome に足します。
+
+```bash
+emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.1.0
+```
+
+Mamela が依存から見つけて、隔離して動かします。プログラムは Pome.lock と sumdb で固定され、`mamela-provider.toml` の sha256 で確かめられます。
+
 ```emela
 import Mamela.{Dhcp, Static}
 import Proxmox
@@ -67,5 +75,4 @@ catalog = "builtin:proxmox"
 MAMELA_TOOLCHAIN_DIR=../mamela/.tools/bin go test ./...   # Mamela の適合試験（偽の Proxmox で）
 ```
 
-- **公開の前提:** `pome/Pome.toml` の `[replace]` は、Mamela の Pome（`pome/mamela` v0.2.0）を公開するまでの仮の設定です。公開の前に外します。
-- **公開の方法:** このリポジトリのタグ（`pome/vX.Y.Z`）を push します。Pome の公開は取り消せません。
+- **公開の方法:** このリポジトリのタグ（`pome/vX.Y.Z`）を push します。Pome の公開は取り消せません。プログラムを変えたら `version` を上げ、`./build.sh` で作り直してからタグを付けます。

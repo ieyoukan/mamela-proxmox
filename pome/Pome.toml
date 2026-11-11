@@ -7,8 +7,3 @@ module = "Proxmox"
 [dependencies]
 "github.com/ieyoukan/mamela/pome/mamela" = "v0.2.0"
 "github.com/emela-lang/x/dynamic" = "v0.5.1"
-
-# Until github.com/ieyoukan/mamela/pome/mamela v0.2.0 is published: a checkout of Mamela next to
-# this repository. Remove this section before tagging a release of this Pome.
-[replace]
-"github.com/ieyoukan/mamela/pome/mamela" = { path = "../../mamela/pome/mamela" }
