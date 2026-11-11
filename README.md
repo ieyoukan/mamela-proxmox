@@ -115,20 +115,24 @@ max_storage_used_percent = 85
 
 ### 準備と片付け（root で実行するスクリプト）
 
-Mamela の Token には、pool や Token や ACL を作る権限はありません。`mamela-proxmox` が、人が読んでから root で実行するスクリプトを作ります。Proxmox には何も送りません。
+Mamela の Token には、pool や Token や ACL を作る権限はありません。そこで、人が読んでから root で実行するスクリプトを、このプロバイダー（Pome で固定された WASM）が書きます。Mamela だけで得られ、Go は要りません。
 
 ```bash
-go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest permissions --providers mamela.providers.toml  # 権限と、それが要る操作
-go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest bootstrap   --providers mamela.providers.toml > bootstrap.sh
-go run github.com/ieyoukan/mamela-proxmox/cmd/mamela-proxmox@latest cleanup     --providers mamela.providers.toml > cleanup.sh
+mamela provider script <pome-dir> proxmox                  # 書けるスクリプトの一覧
+mamela provider script <pome-dir> proxmox permissions      # 操作用の Token の権限と、それが要る操作
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh
+mamela provider script <pome-dir> proxmox cleanup   > cleanup.sh
 ```
 
-- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。
+- **プロバイダーに渡るもの:** `mamela.providers.toml` の `[provider.proxmox.guard]` と、Token の ID と秘密のファイルの場所だけです。秘密そのものは渡りません。
+- **Proxmox への要求:** スクリプトを書く間、プロバイダーは Proxmox に何も送れません（host が拒みます）。
+- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
 - **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ消します。
 
 ## 開発
 
 ```bash
+# Go が要るのは、プロバイダーを開発するときだけ（WASM にビルドし、Mamela の適合試験を通す）
 ./build.sh                          # pome/provider.wasm と pome/mamela-provider.toml を作り直す
 MAMELA_TOOLCHAIN_DIR=../mamela/.tools/bin go test ./...   # Mamela の適合試験（偽の Proxmox で）
 ```

@@ -276,12 +276,12 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	grants := Grants(m, s)
 	if excess := Excess(grants, s, f.Permissions); len(excess) > 0 {
 		add("PVE-0101", block, "the operating token %s has permissions this provider never needs: %s; run the bootstrap script again "+
-			"(mamela-proxmox bootstrap; it removes them)", s.OperatingToken, strings.Join(excess, ", "))
+			"(mamela provider script <pome-dir> proxmox bootstrap; it removes them)", s.OperatingToken, strings.Join(excess, ", "))
 	} else {
 		add("PVE-0101", ok, "the operating token's permissions are within the boundary")
 	}
 	if missing := Missing(grants, f.Permissions); len(missing) > 0 {
-		add("PVE-0102", block, "the operating token %s lacks %s; review and run the bootstrap script again (mamela-proxmox bootstrap)",
+		add("PVE-0102", block, "the operating token %s lacks %s; review and run the bootstrap script again (mamela provider script <pome-dir> proxmox bootstrap)",
 			s.OperatingToken, strings.Join(missing, ", "))
 	} else {
 		add("PVE-0102", ok, "the operating token has every permission this provider needs")

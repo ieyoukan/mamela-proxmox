@@ -174,6 +174,7 @@ func (Provider) Manifest() protocol.Manifest {
 		Observe:      append(pool("VM.Audit", "Pool.Audit"), storage("imageStorage", "Datastore.Audit")...),
 		ObserveCalls: []protocol.Call{listVMs, getConfig, listContent},
 		Guard:        &protocol.Guard{Calls: GuardCalls},
+		Scripts:      Scripts,
 		Kinds: []protocol.Kind{{Kind: Kind, Node: true, Operations: []protocol.Operation{
 			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, resizeDisk, setTags)},
 			{Op: OpStart, Support: protocol.Supported, Needs: pool("VM.PowerMgmt"), Calls: with(startVM)},

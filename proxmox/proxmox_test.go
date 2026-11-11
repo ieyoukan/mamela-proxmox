@@ -61,6 +61,8 @@ func TestConformance(t *testing.T) {
 		Catalog:       catalogs.Proxmox,
 		NewAPI:        func() http.Handler { return newFake() },
 		GuardSettings: guardSettings,
+		ScriptCredentials: protocol.ScriptCredentials{TokenID: "mamela@pve!lab", TokenFile: "/token",
+			GuardTokenID: "mamela-audit@pve!audit", GuardTokenFile: "/audit-token"},
 		Cases: []providertest.Case{
 			{Name: "one-vm", Desired: []protocol.Resource{
 				vm("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
