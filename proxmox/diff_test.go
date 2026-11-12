@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ieyoukan/mamela/provider/protocol"
@@ -69,5 +70,66 @@ func TestOwnershipNeedsTheTag(t *testing.T) {
 	}
 	if owned, unfinished := Ownership(false); owned || !unfinished {
 		t.Fatal("an untagged VM is claimed as owned")
+	}
+}
+
+// The start planned with a create is exactly the start of the VM found stopped later (after a
+// create whose answer was lost): Mamela goes on with the approved plan only while the changes are
+// the same. Both are late, so that every create of the apply comes first.
+func TestStartIsTheSameChangeEitherWay(t *testing.T) {
+	spec := []byte(`{` + testSite + `,"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}}`)
+	r := protocol.Resource{ID: "ProxmoxVM web", Kind: Kind, Name: "web", Spec: spec}
+	free, _ := json.Marshal(State{FreeVMIDs: []int64{7001}})
+	created, err := Provider{}.Diff(context.Background(), protocol.DiffParams{Desired: []protocol.Resource{r},
+		Observed: []protocol.Observed{{ID: r.ID, Kind: Kind, Name: "web", State: free}}})
+	if err != nil || len(created.Changes) != 2 {
+		t.Fatalf("%v %v", created.Changes, err)
+	}
+	stopped, _ := json.Marshal(State{CPU: 1, MemoryMiB: 1024, DiskGiB: 10, Image: "ubuntu-24.04", Network: "dhcp", Tagged: true})
+	later, err := Provider{}.Diff(context.Background(), protocol.DiffParams{Desired: []protocol.Resource{r},
+		Observed: []protocol.Observed{{ID: r.ID, Kind: Kind, Name: "web", Exists: true, Owned: true, Version: "d1",
+			IDs: map[string]string{"node": "pve1", "vmid": "7001"}, State: stopped}}})
+	if err != nil || len(later.Changes) != 1 {
+		t.Fatalf("%v %v", later.Changes, err)
+	}
+	a, _ := json.Marshal(created.Changes[1], json.Deterministic(true))
+	b, _ := json.Marshal(later.Changes[0], json.Deterministic(true))
+	if string(a) != string(b) || !later.Changes[0].Late {
+		t.Errorf("the starts differ:\n%s\n%s", a, b)
+	}
+}
+
+// A template is never deleted while a VM is a linked clone of it: delete-template refuses, and
+// says which VMs to delete first.
+func TestDeleteTemplateWithClonesIsRefused(t *testing.T) {
+	o := protocol.Observed{ID: "ProxmoxTemplate ubuntu-24.04-pve1", Kind: KindTemplate, Name: "ubuntu-24.04-pve1", Exists: true, Owned: true,
+		IDs: map[string]string{"node": "pve1", "vmid": "7009"}, State: []byte(`{"image":"ubuntu-24.04","template":true,"tagged":true,"clones":[7001]}`)}
+	if _, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpDeleteTemplate, Observed: o}); err == nil ||
+		!strings.Contains(err.Error(), "7001") {
+		t.Fatalf("a template with a clone: %v", err)
+	}
+	o.State = []byte(`{"image":"ubuntu-24.04","template":true,"tagged":true}`)
+	r, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpDeleteTemplate, Observed: o})
+	if err != nil || len(r.Change.Requests) != 1 || r.Change.Requests[0].Method != "DELETE" {
+		t.Fatalf("a template without clones: %+v %v", r.Change, err)
+	}
+	if _, err := (Provider{}).Prepare(t.Context(), protocol.PrepareParams{Op: OpReboot, Observed: o}); err == nil {
+		t.Error("a template is rebooted")
+	}
+}
+
+// The VMIDs other plans are to create (Mamela's claims) are taken: plans made one after another
+// and applied together do not choose the same VMID.
+func TestClaimedVMIDsAreTaken(t *testing.T) {
+	vms := map[int64]resource{7000: {VMID: 7000}}
+	claimed := []map[string]string{{"node": "pve1", "vmid": "7001"}, {"node": "pve2", "vmid": "7002"}, {"node": "pve1", "vmid": "7009", "newid": "7009"}}
+	if got := freeVMIDs(vms, claimed, "pve1", 7000, 7009, false); !slices.Equal(got[:3], []int64{7002, 7003, 7004}) {
+		t.Errorf("from the bottom: %v", got)
+	}
+	if got := freeVMIDs(vms, claimed, "pve1", 7000, 7009, true); got[0] != 7008 {
+		t.Errorf("from the top: %v", got)
+	}
+	if got := freeVMIDs(vms, nil, "pve1", 7000, 7001, false); !slices.Equal(got, []int64{7001}) {
+		t.Errorf("no claims: %v", got)
 	}
 }

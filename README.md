@@ -12,31 +12,74 @@
 
 プロバイダーはファイルの中身にも Token にも触れません（Mamela の ADR 0002、0004）。
 
+Proxmox の安全装置（guard、明示操作、root 用のスクリプト）もこのプロバイダーにあります。Mamela 本体は、それを汎用の仕組みとして強制します（Mamela の ADR 0006）。共有の本番クラスタで使う手順は [docs/lab.md](docs/lab.md) にあります。
+
 ## できること
 
 | 操作 | 内容 |
 |---|---|
-| `create-vm` | イメージと seed をアップロードして、VM を作る（止まったまま。マーカーとタグを付ける） |
+| `create-template` | イメージから VM を一度だけ作り、テンプレートにする（タグとマーカーを付ける。VMID は範囲の上から） |
+| `finish-template` | 中断された作成の、タグ付けとテンプレートへの変換の続き |
+| `create-vm` | seed をアップロードし、テンプレートの linked clone として VM を作る（数秒。止まったまま。サイズ・seed・ディスク・タグを設定する）。テンプレートを使わない宣言では、イメージを VM のディスクに取り込む |
+| `finish-clone` | 中断された複製の、seed とサイズの設定の続き |
 | `start-vm` | 起動する（同じ実行のすべての VM を作った後） |
 | `grow-vm-disk` | ディスクを大きくする |
 | `resize-vm` | vCPU とメモリを変える（動いていれば再起動する） |
 | `tag-vm` | 中断された作成の、タグ付けの続き |
 
-しないこと:
+しないこと（差分としては示し、Mamela が拒みます）:
 
 - ディスクの縮小
 - イメージの変更
 - ネットワークの変更
-- 削除
 
-マーカーのない VM には触れません。
+マーカーのない VM には触れません。宣言を消しても、VM もテンプレートも消しません。
+
+### テンプレート
+
+イメージを VM ごとに取り込むと、遅いディスクでは 1 台に 15〜20 分かかります。そのため VM は、イメージのテンプレートの linked clone にします。LVM-thin のスナップショットなので、数秒でできます。
+
+- **宣言:** `Proxmox.vm` は、VM の複製元のテンプレート（`ProxmoxTemplate <image>-<node>`）も宣言します。同じイメージとノードの VM がいくつあっても、Mamela は同じ宣言を 1 つのリソースとみなします。VM は、テンプレートができあがるまで待ちます。
+- **作る:** Mamela は、テンプレートを最初の plan で一度だけ作ります。pool・VMID の範囲（上から）・タグの中に置き、マーカーを付けます。テンプレートは起動しません。
+- **消す:** 明示操作 `delete-template` だけです。そのテンプレートの linked clone の VM が 1 台でもあれば拒みます。
+- **イメージの更新:** イメージの版を上げると、新しいテンプレートを宣言することになります。古いテンプレートは、使う VM がなくなってから消します。
+- **要る権限:** 操作用 Token に、`VM.Clone`（テンプレートの複製）と `VM.Config.CDROM`（複製した VM に seed を付ける）が足されます。bootstrap を root でもう一度実行するまで、guard の PVE-0102 が止めます。
+
+### 明示操作
+
+plan には入らず、人が名前を打ち直したときだけ行う操作です（`mamela act <op> <resource> --confirm <name>`）。対象は、Mamela が作成を記録した VM に限ります。
+
+| 操作 | 内容 |
+|---|---|
+| `delete-vm` | 止めてから、VM とディスクを消す（データを失う） |
+| `reboot-vm` | ゲストに再起動を頼む（ACPI） |
+| `reset-vm` | すぐに再起動する（リセットボタンと同じ。応答しないゲスト向け） |
+| `adopt-vm` | Mamela の旧組み込みプロバイダーが作った VM を引き継ぐ（このプロバイダーのマーカーとタグを書く） |
+| `delete-template` | テンプレートとそのディスクを消す（linked clone の VM が残っていれば拒む） |
+
+送る直前に、VMID の VM がまだその名前のマーカーを持つことを確かめます。違えば何も送りません。
+
+### guard（適用の前後の安全確認）
+
+Proxmox のクラスタには、Mamela と関係のないゲストが動いていることがあります。Mamela は、このプロバイダーの変更を apply する前後に guard を呼びます。guard は読み取りしかできず、lab の外も見える監査用の Token（`guard_token_id`）で読みます。
+
+| コード | 前 / 後 | 確かめること |
+|---|---|---|
+| `PVE-0001`〜`0003` | 前 | クォーラム、ノードの数、対象のノードが動いていること |
+| `PVE-0101`・`0102` | 前 | 操作用の Token の権限が、このプロバイダーに要る権限とちょうど同じこと（多すぎも少なすぎも止める） |
+| `PVE-0201`〜`0203` | 前 | 変更の後に残るメモリとストレージの余裕、イメージを置けるストレージ |
+| `PVE-0301`〜`0303` | 前 | pool と VMID の範囲に他人のゲストがないこと、VM の数 |
+| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ）の中にあること。宣言が何を書いても、ここで止まる |
+| `PVE-0400`〜`0405` | 後 | 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと |
+
+`block` が 1 つでもあれば、Mamela はそのプロバイダーの変更を送りません。
 
 ## 使い方
 
 宣言の Pome に足します。
 
 ```bash
-emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.1.0
+emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.0
 ```
 
 Mamela が依存から見つけて、隔離して動かします。プログラムは Pome.lock と sumdb で固定され、`mamela-provider.toml` の sha256 で確かめられます。
@@ -52,11 +95,11 @@ web = Proxmox.Vm(name: "web", cpu: 2, memory_mib: 2048, disk_gib: 20, image: "ub
 
 Mamela.empty()
   |> Proxmox.vm(site, web)
-  |> Mamela.package_on(Proxmox.node(web), "nginx")
-  |> Mamela.service_on(Proxmox.node(web), "nginx", True, True)
+  |> Mamela.package(Proxmox.node(web), "nginx")
+  |> Mamela.service(Proxmox.node(web), "nginx", True, True)
 ```
 
-`mamela.providers.toml` に、API の場所と Token を書きます。カタログは Mamela のものを使います。
+`mamela.providers.toml` に、API の場所と Token を書きます。カタログは、この Pome が同梱するもの（`pome/catalogs/proxmox.json`）を名前で選びます。Mamela は、プログラムのすべての要求をこのカタログで分類します（Mamela の ADR 0008）。中身は `mamela provider catalog pome` で読めます。
 
 ```toml
 [provider.proxmox]
@@ -65,12 +108,57 @@ auth = "proxmox"
 token_id = "mamela@pve!lab"
 token_file = "~/.config/mamela/lab-token"
 tls_fingerprint = "AA:BB:..."
-catalog = "builtin:proxmox"
+catalog = "pome:proxmox"
+# guard だけが使う、読み取り専用の監査用 Token（PVEAuditor）
+guard_token_id = "mamela-audit@pve!audit"
+guard_token_file = "~/.config/mamela/audit-token"
+
+# guard の設定: 運用者が決める境界と安全の閾値（秘密ではない）
+[provider.proxmox.guard]
+node = "pve1"
+pool = "mamela"
+vmid_min = 7000
+vmid_max = 7099
+tag = "mamela"
+disk_storage = "local-lvm"
+image_storage = "local"
+bridge = "vmbr0"
+operating_token = "mamela@pve!lab"     # token_id と同じ
+max_vms = 6
+min_host_mem_available_mib = 4096
+max_storage_used_percent = 85
 ```
+
+### 準備と片付け（root で実行するスクリプト）
+
+Mamela の Token には、pool や Token や ACL を作る権限はありません。そこで、人が読んでから root で実行するスクリプトを、このプロバイダー（Pome で固定された WASM）が書きます。Mamela だけで得られ、Go は要りません。
+
+```bash
+mamela provider script <pome-dir> proxmox                  # 書けるスクリプトの一覧
+mamela provider script <pome-dir> proxmox permissions      # 操作用の Token の権限と、それが要る操作
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh
+mamela provider script <pome-dir> proxmox cleanup   > cleanup.sh
+```
+
+- **プロバイダーに渡るもの:** `mamela.providers.toml` の `[provider.proxmox.guard]` と、Token の ID と秘密のファイルの場所だけです。秘密そのものは渡りません。
+- **Proxmox への要求:** スクリプトを書く間、プロバイダーは Proxmox に何も送れません（host が拒みます）。
+- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
+- **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ消します。
+
+## 例
+
+| 例 | 内容 |
+|---|---|
+| [examples/homelab](examples/homelab/src/main.emel) | VM 1 台と nginx |
+| [examples/k3s](examples/k3s/src/main.emel) | 固定アドレスの k3s（server 1 台、agent 2 台） |
+
+値は架空です。実際の値は、公開しない場所の宣言に書きます。
 
 ## 開発
 
 ```bash
+# Go が要るのは、プロバイダーを開発するときだけ（WASM にビルドし、Mamela の適合試験を通す）
+# 例の確認: (cd examples/k3s && emela check)。依存は emela が Pome.lock どおりに取得する
 ./build.sh                          # pome/provider.wasm と pome/mamela-provider.toml を作り直す
 MAMELA_TOOLCHAIN_DIR=../mamela/.tools/bin go test ./...   # Mamela の適合試験（偽の Proxmox で）
 ```

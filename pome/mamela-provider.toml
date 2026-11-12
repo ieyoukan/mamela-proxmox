@@ -1,6 +1,11 @@
 # The provider program of this Pome. Mamela runs it isolated (WASM) and checks this sha256;
 # Pome.lock and the sumdb pin the whole Pome, this file and the program included.
 provider = "proxmox"
-version = "0.1.0"
+version = "0.2.0"
 program = "provider.wasm"
-sha256 = "7e60fd46cb068f2bcc0ea4e0a1af8815298c99b9adc9cff0dfdaacf63c81ba24"
+sha256 = "c32afb59061a73f13f7c98a0084de256e5d17c54aa6812c0c735bf131e8be6af"
+
+# The catalog of the API the provider calls (ADR 0008 of Mamela). Mamela classifies the program's
+# requests with it only when the operator names it (mamela.providers.toml: catalog = "pome:proxmox").
+[catalogs]
+proxmox = "catalogs/proxmox.json"

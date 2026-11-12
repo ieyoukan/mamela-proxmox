@@ -11,8 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ieyoukan/mamela-proxmox/catalogs"
 	"github.com/ieyoukan/mamela-proxmox/fakepve"
-	"github.com/ieyoukan/mamela/provider/catalogs"
+	"github.com/ieyoukan/mamela-proxmox/proxmox"
 	"github.com/ieyoukan/mamela/provider/protocol"
 	"github.com/ieyoukan/mamela/provider/providertest"
 )
@@ -23,20 +24,83 @@ func vm(name, rest string) protocol.Resource {
 	return protocol.Resource{ID: "ProxmoxVM " + name, Kind: "ProxmoxVM", Name: name, Spec: []byte(`{` + site + `,` + rest + `}`)}
 }
 
+// template is the template of the image on the cases' site, as the Pome declares it.
+func template(name string) protocol.Resource {
+	return protocol.Resource{ID: "ProxmoxTemplate " + name, Kind: "ProxmoxTemplate", Name: name,
+		Spec: []byte(`{` + site + `,"image":"ubuntu-24.04"}`)}
+}
+
+// clone is a VM cloned from the template.
+func clone(name, rest string) protocol.Resource {
+	r := vm(name, rest+`,"template":"ubuntu-24.04-pve1"`)
+	r.After = []string{"ProxmoxTemplate ubuntu-24.04-pve1"}
+	return r
+}
+
+// guardSettings are the guard's settings for the fake cluster, with the boundary of the cases.
+var guardSettings = []byte(`{"node":"pve1","pool":"lab","vmid_min":7000,"vmid_max":7009,"tag":"mamela-lab","disk_storage":"local-lvm",` +
+	`"image_storage":"local","bridge":"vmbr0","operating_token":"mamela@pve!lab","max_vms":4,` +
+	`"min_host_mem_available_mib":4096,"max_storage_used_percent":80}`)
+
+// newFake is a fake Proxmox whose operating token holds exactly the grants the provider needs.
+func newFake() *fakepve.Server {
+	s, err := proxmox.ParseGuardSettings(guardSettings)
+	if err != nil {
+		panic(err)
+	}
+	f := fakepve.New()
+	f.Permissions = map[string]map[string]int{}
+	for _, g := range proxmox.Grants(proxmox.Provider{}.Manifest(), s) {
+		f.Permissions[g.Path] = map[string]int{}
+		for _, p := range g.Privs {
+			f.Permissions[g.Path][p] = 1
+		}
+	}
+	return f
+}
+
+// oldVM is a VM Mamela's built-in provider made (before ADR 0006): its marker, in the pool.
+func oldVM(vmid int64, name string) fakepve.VM {
+	return fakepve.VM{VMID: vmid, Name: name, Node: "pve1", Pool: "lab", Cores: 1, Memory: 1024, DiskGiB: 10, Tags: "mamela-lab", Running: true,
+		Description: proxmox.OldMarker + "\nmamela-name: " + name + "\nmamela-image: ubuntu-24.04\nmamela-network: dhcp\nmamela-state: ready\n"}
+}
+
 // The provider passes Mamela's conformance suite against a fake Proxmox, with the catalog Mamela
 // ships for Proxmox: every request within its permit, convergence, undeclared VMs kept, and a
 // lost or unsent request at any point recovered.
 func TestConformance(t *testing.T) {
 	providertest.Run(t, providertest.Suite{
-		Provider: providertest.BuildWASI(t, "../cmd/proxmox-provider"),
-		Catalog:  catalogs.Proxmox,
-		NewAPI:   func() http.Handler { return fakepve.New() },
+		Provider:      providertest.BuildWASI(t, "../cmd/proxmox-provider"),
+		Catalog:       providertest.Catalog(t, "../pome/catalogs/proxmox.json"), // as the Pome ships it
+		NewAPI:        func() http.Handler { return newFake() },
+		GuardSettings: guardSettings,
+		ScriptCredentials: protocol.ScriptCredentials{TokenID: "mamela@pve!lab", TokenFile: "/token",
+			GuardTokenID: "mamela-audit@pve!audit", GuardTokenFile: "/audit-token"},
 		Cases: []providertest.Case{
 			{Name: "one-vm", Desired: []protocol.Resource{
-				vm("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)}},
+				vm("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpReboot, Resource: "ProxmoxVM web"}, {Op: proxmox.OpReset, Resource: "ProxmoxVM web"},
+					{Op: proxmox.OpDelete, Resource: "ProxmoxVM web"}}},
+			// A VM of the old built-in provider, taken over, then managed as any other; a container
+			// of someone else's, outside the boundary, is left alone.
+			{Name: "adopt", Desired: []protocol.Resource{
+				vm("old", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				World: func(api http.Handler) {
+					f := api.(*fakepve.Server)
+					f.Put(oldVM(7003, "old"))
+					f.Put(fakepve.VM{VMID: 105, Name: "someone-else", Node: "pve1", Type: "lxc", Running: true})
+				},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpAdopt, Resource: "ProxmoxVM old"}}},
 			{Name: "two-vms-static", Desired: []protocol.Resource{
 				vm("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
 				vm("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)}},
+			// VMs as linked clones of a template made once: the template first, then the clones;
+			// deleting them, then the template.
+			{Name: "cloned", Desired: []protocol.Resource{template("ubuntu-24.04-pve1"),
+				clone("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
+				clone("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpDelete, Resource: "ProxmoxVM a"}, {Op: proxmox.OpDelete, Resource: "ProxmoxVM b"},
+					{Op: proxmox.OpDeleteTemplate, Resource: "ProxmoxTemplate ubuntu-24.04-pve1"}}},
 		},
 	})
 }
@@ -59,5 +123,24 @@ func TestPomeProgramIsTheBuild(t *testing.T) {
 	toml, _ := os.ReadFile("../pome/mamela-provider.toml")
 	if !strings.Contains(string(toml), `sha256 = "`+hex.EncodeToString(sum[:])+`"`) {
 		t.Error("pome/mamela-provider.toml does not name the program: run ./build.sh")
+	}
+}
+
+// The catalog the Pome ships is exactly what the catalogs package writes (build.sh), and
+// mamela-provider.toml lists it.
+func TestShippedCatalogIsTheSource(t *testing.T) {
+	toml, _ := os.ReadFile("../pome/mamela-provider.toml")
+	for name, c := range catalogs.All {
+		want, err := catalogs.Encode(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile("../pome/catalogs/" + name + ".json")
+		if !bytes.Equal(got, want) {
+			t.Errorf("pome/catalogs/%s.json is not what catalogs writes: run ./build.sh", name)
+		}
+		if !strings.Contains(string(toml), name+` = "catalogs/`+name+`.json"`) {
+			t.Errorf("pome/mamela-provider.toml does not list catalog %s: run ./build.sh", name)
+		}
 	}
 }
