@@ -1,7 +1,6 @@
 package proxmox
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -10,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ieyoukan/mamela/provider/kit"
 	"github.com/ieyoukan/mamela/provider/protocol"
-	"github.com/ieyoukan/mamela/provider/sdk"
 )
 
 // A template is a VM made once from a pinned image and converted to a Proxmox template: a VM of
@@ -47,6 +46,19 @@ func parseTemplateMarker(description string) (marker, bool) {
 	return parseMarkerAfter(TemplateMarker, description)
 }
 
+// copiedTemplateMarker says whether a VM carries a template's marker only because it was cloned
+// from the template by someone else (Terraform's clone copies the description): it is not a
+// template, and it is a linked clone or has another name. Mamela makes its templates from images,
+// never by cloning, under the marker's name. Such a VM is neither Mamela's template nor Mamela's
+// VM; it can be imported and adopted. name is the VM's name (its configuration's when "").
+func copiedTemplateMarker(name string, cfg vmConfig) bool {
+	if name == "" {
+		name = cfg.Name
+	}
+	m, ok := parseTemplateMarker(cfg.Description)
+	return ok && !cfg.Template && (baseOf(cfg.SCSI0) != 0 || name != "" && name != m.Name)
+}
+
 var (
 	createTemplateVM = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu", Form: []string{"vmid", "name", "pool", "description", "ostype",
 		"scsihw", "scsi0", "boot", "serial0", "vga", "net0", "agent"}}
@@ -59,23 +71,25 @@ var (
 
 // TemplateSpec is a declared template: where it goes (the site's) and its image.
 type TemplateSpec struct {
-	Node         string `json:"node"`
-	Pool         string `json:"pool"`
-	DiskStorage  string `json:"diskStorage"`
-	ImageStorage string `json:"imageStorage"`
-	Bridge       string `json:"bridge"`
-	Tag          string `json:"tag"`
-	VMIDMin      int64  `json:"vmidMin"`
-	VMIDMax      int64  `json:"vmidMax"`
-	Image        string `json:"image"`
+	Node         string `json:"node" doc:"the Proxmox VE node"`
+	Pool         string `json:"pool" doc:"the pool Mamela's token may change"`
+	DiskStorage  string `json:"diskStorage" doc:"the storage of its disk"`
+	ImageStorage string `json:"imageStorage" doc:"the storage of the image it is made from"`
+	Bridge       string `json:"bridge" doc:"the bridge of its network"`
+	Tag          string `json:"tag" doc:"the tag Mamela puts on its VMs"`
+	VMIDMin      int64  `json:"vmidMin" doc:"the first VMID Mamela may use"`
+	VMIDMax      int64  `json:"vmidMax" doc:"the last VMID Mamela may use (templates take theirs from the top)"`
+	Image        string `json:"image" doc:"the pinned image (ubuntu-24.04)"`
 }
 
 // TemplateState is what is observed of a template.
 type TemplateState struct {
-	Image    string  `json:"image,omitempty"`
-	Template bool    `json:"template,omitempty"` // converted
-	Tagged   bool    `json:"tagged,omitempty"`
-	Clones   []int64 `json:"clones,omitempty"` // the VMs that are linked clones of it
+	Image    string   `json:"image,omitempty"`
+	Template bool     `json:"template,omitempty"` // converted
+	Tagged   bool     `json:"tagged,omitempty"`   // it has the declared tag
+	Clones   []int64  `json:"clones,omitempty"`   // the VMs that are linked clones of it
+	Pool     string   `json:"pool,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
 	// For one that does not exist yet: the free VMIDs from the top of its range, and whether its
 	// image is already on the image storage.
 	FreeVMIDs     []int64 `json:"freeVmids,omitempty"`
@@ -111,105 +125,138 @@ func baseOf(drive string) int64 {
 	return n
 }
 
-// configs reads the configuration of each VM of a pool on a node, once per observation.
-type configs struct {
-	ctx  context.Context
-	h    *sdk.Host
-	seen map[int64]vmConfig
+// templateKind is the kind ProxmoxTemplate.
+type templateKind struct{ run *run }
+
+func (*templateKind) Kind() protocol.ResourceKind { return KindTemplate }
+func (*templateKind) Spec() any                   { return TemplateSpec{} }
+func (*templateKind) Reads() []protocol.Call      { return reads }
+
+func (*templateKind) Doc() string {
+	return "The template of an image on a node, made once from the pinned image: the VMs of the image are linked clones of it.\n" +
+		"Proxmox.vm declares it with each VM; it is deleted only by the explicit delete-template, once no VM is cloned from it."
 }
 
-func (c *configs) of(node string, vmid int64) (vmConfig, error) {
-	if cfg, ok := c.seen[vmid]; ok {
-		return cfg, nil
+func (*templateKind) Operations() []protocol.Operation {
+	create := needs(atPool("VM.Allocate", "VM.Audit", "VM.Config.Disk", "VM.Config.HWType", "VM.Config.Network", "VM.Config.Options"),
+		atStorage("diskStorage", "Datastore.AllocateSpace"), atStorage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate"),
+		atBridge("SDN.Use"))
+	return []protocol.Operation{
+		kit.Op(OpCreateTemplate, create, upload, createTemplateVM, setTags, convertTemplate),
+		kit.Op(OpFinishTemplate, atPool("VM.Allocate", "VM.Config.Options"), setTags, convertTemplate),
+		kit.Unsupported(OpReplaceImage, "a template keeps its image: the Pome declares a template of the new image for the VMs of it"),
+		kit.Unsupported(OpMove, "Mamela never moves a template to another node, pool or VMID: declare it where it is"),
+		kit.ExplicitOp(OpDeleteTemplate, atPool("VM.Allocate"), deleteVM),
 	}
-	cfg, err := config(c.ctx, c.h, node, vmid)
-	if err == nil {
-		c.seen[vmid] = cfg
-	}
-	return cfg, err
 }
 
-// observeTemplate finds a declared template, or tells what creating it needs.
-func observeTemplate(cs *configs, r protocol.Resource, vms map[int64]resource, mine map[int64]bool, claimed []map[string]string) (protocol.Observed, error) {
-	s, err := templateSpec(r)
+// List is every template in a pool that carries the template marker, with the VMs cloned from it:
+// one not converted yet is unfinished.
+func (k *templateKind) List(c *kit.Client) ([]kit.Object, error) {
+	rd := k.run.reader(c)
+	vms, err := rd.list()
 	if err != nil {
-		return protocol.Observed{}, err
+		return nil, err
 	}
-	o := protocol.Observed{ID: r.ID, Kind: KindTemplate, Name: r.Name}
+	var out []kit.Object
 	for _, vmid := range slices.Sorted(maps.Keys(vms)) {
 		vm := vms[vmid]
-		if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax {
+		if vm.Pool == "" {
 			continue
 		}
-		cfg, err := cs.of(vm.Node, vmid)
+		cfg, err := rd.config(vm.Node, vmid)
 		if err != nil {
-			return o, err
+			return nil, err
 		}
-		if m, ok := parseTemplateMarker(cfg.Description); ok && m.Name == r.Name {
-			mine[vmid] = true
-			return o, fillTemplate(cs, &o, vm, cfg, m, s.Tag, vms)
+		m, ok := parseTemplateMarker(cfg.Description)
+		if !ok || copiedTemplateMarker(vm.Name, cfg) {
+			continue
 		}
+		st := TemplateState{Image: m.Image, Template: cfg.Template, Pool: vm.Pool, Tags: cfg.Tags}
+		for _, id := range slices.Sorted(maps.Keys(vms)) {
+			other := vms[id]
+			if id == vm.VMID || other.Node != vm.Node {
+				continue
+			}
+			oc, err := rd.config(other.Node, id)
+			if err != nil {
+				return nil, err
+			}
+			if baseOf(oc.SCSI0) == vm.VMID {
+				st.Clones = append(st.Clones, id)
+			}
+		}
+		out = append(out, kit.Object{Name: m.Name, IDs: ids(vm.Node, vm.VMID), Version: cfg.Digest, State: st, Unfinished: !cfg.Template})
 	}
-	st := TemplateState{FreeVMIDs: freeVMIDs(vms, claimed, s.Node, s.VMIDMin, s.VMIDMax, true)}
-	img := Images[s.Image]
-	var err2 error
-	if st.ImageUploaded, err2 = hasVolume(cs.ctx, cs.h, s.Node, s.ImageStorage, "import", VolumeName(s.Image, img)); err2 != nil {
-		return o, err2
-	}
-	o.State, _ = json.Marshal(st, json.Deterministic(true))
-	return o, nil
+	return out, nil
 }
 
-// fillTemplate fills in an observed template: owned when tagged and converted (unfinished when
-// not), with the VMs cloned from it.
-func fillTemplate(cs *configs, o *protocol.Observed, vm resource, cfg vmConfig, m marker, tag string, vms map[int64]resource) error {
-	tagged := tag == "" || slices.Contains(cfg.Tags, tag)
-	o.Exists, o.Version = true, cfg.Digest
-	o.Owned, o.Unfinished = tagged && cfg.Template, !(tagged && cfg.Template)
-	o.IDs = ids(vm.Node, vm.VMID)
-	st := TemplateState{Image: m.Image, Template: cfg.Template, Tagged: tag != "" && slices.Contains(cfg.Tags, tag)}
-	for _, id := range slices.Sorted(maps.Keys(vms)) {
-		other := vms[id]
-		if id == vm.VMID || other.Node != vm.Node {
-			continue
-		}
-		c, err := cs.of(other.Node, id)
-		if err != nil {
-			return err
-		}
-		if baseOf(c.SCSI0) == vm.VMID {
-			st.Clones = append(st.Clones, id)
-		}
+// claim: a declared template is Mamela's when it is converted and has the declared tag (unfinished
+// when not); one that is not declared, when it is converted.
+func (k *templateKind) claim(o *protocol.Observed, r *protocol.Resource) error {
+	if !o.Exists || r == nil {
+		return nil
 	}
-	o.State, _ = json.Marshal(st, json.Deterministic(true))
+	s, err := templateSpec(*r)
+	if err != nil {
+		return err
+	}
+	var st TemplateState
+	if err := decodeState(*o, &st); err != nil {
+		return err
+	}
+	st.Tagged = slices.Contains(st.Tags, s.Tag)
+	o.Owned, o.Unfinished = st.Tagged && st.Template, !(st.Tagged && st.Template)
+	o.State = encode(st)
 	return nil
 }
 
-// diffTemplate is what makes a template that does not exist, or finishes one.
-func diffTemplate(r protocol.Resource, o protocol.Observed, uploading map[string]bool) ([]protocol.Change, error) {
+// Missing is what creating a declared template needs: the free VMIDs from the top of its range,
+// and whether its image is on the image storage already.
+func (k *templateKind) Missing(c *kit.Client, r protocol.Resource) (any, error) {
 	s, err := templateSpec(r)
 	if err != nil {
 		return nil, err
 	}
+	vms, err := k.run.reader(c).list()
+	if err != nil {
+		return nil, err
+	}
+	st := TemplateState{FreeVMIDs: freeVMIDs(vms, c.Claimed, s.Node, s.VMIDMin, s.VMIDMax, true)}
+	if st.ImageUploaded, err = hasVolume(c, s.Node, s.ImageStorage, "import", VolumeName(s.Image, Images[s.Image])); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// Diff is what makes a template that does not exist, or finishes one.
+func (k *templateKind) Diff(d kit.Desired) ([]protocol.Change, error) {
+	r, o := d.Resource, d.Observed
+	s, err := templateSpec(r)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", r.ID, err)
+	}
 	var st TemplateState
-	if len(o.State) > 0 {
-		if err := json.Unmarshal(o.State, &st); err != nil {
-			return nil, err
-		}
+	if err := decodeState(o, &st); err != nil {
+		return nil, err
 	}
 	img := Images[s.Image]
 	vol := VolumeName(s.Image, img)
 	switch {
 	case !o.Exists:
-		if len(st.FreeVMIDs) == 0 {
-			return nil, fmt.Errorf("no free VMID in %d..%d", s.VMIDMin, s.VMIDMax)
+		vmid := int64(0)
+		for _, id := range st.FreeVMIDs {
+			if k.run.take(id) {
+				vmid = id
+				break
+			}
 		}
-		vmid := st.FreeVMIDs[0]
-		key := s.Node + "/" + s.ImageStorage + "/" + s.Image
-		if uploading[key] {
+		if vmid == 0 {
+			return nil, fmt.Errorf("%s: no free VMID in %d..%d", r.ID, s.VMIDMin, s.VMIDMax)
+		}
+		if k.run.upload(s.Node, s.ImageStorage, s.Image) {
 			st.ImageUploaded = true
 		}
-		uploading[key] = true
 		c := protocol.Change{Resource: r.ID, Kind: KindTemplate, Op: OpCreateTemplate,
 			IDs: map[string]string{"node": s.Node, "vmid": strconv.FormatInt(vmid, 10), "storage": s.ImageStorage},
 			Reasons: []string{fmt.Sprintf("template %d from %s on %s, in pool %s: the VMs of this image are linked clones of it (made in seconds)",
@@ -231,6 +278,9 @@ func diffTemplate(r protocol.Resource, o protocol.Observed, uploading map[string
 	case !o.Owned && !o.Unfinished:
 		return nil, nil // not Mamela's: nothing is planned for it
 	}
+	if moved := movedFrom(s.Node, s.Pool, s.VMIDMin, s.VMIDMax, o.IDs, st.Pool); moved != "" {
+		return []protocol.Change{{Resource: r.ID, Kind: KindTemplate, Op: OpMove, IDs: o.IDs, Reasons: []string{moved}}}, nil
+	}
 	var out []protocol.Change
 	if !st.Tagged || !st.Template {
 		c := protocol.Change{Resource: r.ID, Kind: KindTemplate, Op: OpFinishTemplate, IDs: o.IDs, Precondition: o.Version}
@@ -250,6 +300,19 @@ func diffTemplate(r protocol.Resource, o protocol.Observed, uploading map[string
 			Reasons: []string{fmt.Sprintf("image %s -> %s: declare a template of the new image (the VMs name it)", st.Image, s.Image)}})
 	}
 	return out, nil
+}
+
+func (*templateKind) Done(c *kit.Client, ch protocol.Change, a protocol.Approved) (bool, error) {
+	return done(c, ch, a)
+}
+
+func (*templateKind) Lookup(c *kit.Client, ch protocol.Change) (protocol.LookupStatus, bool, error) {
+	status, err := lookup(c, ch)
+	return status, true, err
+}
+
+func (*templateKind) Prepare(op protocol.Op, o protocol.Observed, _ *protocol.Resource) (protocol.Change, error) {
+	return prepareTemplate(op, o)
 }
 
 // cloneChange makes a VM as a linked clone of its template: the seed, the clone (with its marker),
@@ -286,31 +349,4 @@ func finishClone(r protocol.Resource, s Spec, o protocol.Observed) protocol.Chan
 				"memory": {strconv.FormatInt(s.MemoryMiB, 10)}, "ide2": {s.ImageStorage + ":iso/{artifact:seed.name},media=cdrom"},
 				"digest": {o.Version}}},
 		}}
-}
-
-// freeVMIDs are up to 64 VMIDs of a range that no guest has and that no other plan is to create on
-// the node (Mamela's claims): from the bottom of the range (VMs) or from the top (templates).
-func freeVMIDs(vms map[int64]resource, claimed []map[string]string, node string, min, max int64, fromTop bool) []int64 {
-	taken := map[int64]bool{}
-	for _, ids := range claimed {
-		if ids["node"] != node {
-			continue
-		}
-		for _, k := range []string{"vmid", "newid"} {
-			if n, err := strconv.ParseInt(ids[k], 10, 64); err == nil {
-				taken[n] = true
-			}
-		}
-	}
-	var out []int64
-	for i := int64(0); i <= max-min && len(out) < 64; i++ {
-		id := min + i
-		if fromTop {
-			id = max - i
-		}
-		if _, exists := vms[id]; !exists && !taken[id] {
-			out = append(out, id)
-		}
-	}
-	return out
 }

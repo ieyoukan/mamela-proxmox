@@ -1,16 +1,22 @@
 // Package proxmox is a Mamela provider of Proxmox VE virtual machines that mamelet runs on. It
 // runs as a separate, isolated program (WASM): it reaches Proxmox only through the Mamela host,
-// which holds the token and checks every request against Mamela's Proxmox catalog and the change's
-// permit, and which makes the files a VM is created from (ADR 0004 of Mamela):
+// which holds the token and checks every request against the Proxmox catalog this Pome ships and
+// the change's permit, and which makes the files a VM is created from (ADR 0004 of Mamela):
 //
 //   - the cloud image, a pinned download (URL and sha256 from Images), uploaded once per storage;
 //   - the VM's mamelet seed, made by the host with a one-time enrollment token.
 //
+// It is written with Mamela's provider kit (provider/kit, ADR 0009 of Mamela): each kind (vm.go,
+// template.go) says how to list its objects, what a declaration changes and whether a request is
+// in effect, and kit does the protocol. provider.go joins them, with what kit does not do yet.
+//
 // Kind ProxmoxVM is a node kind: Mamela runs mamelet on these VMs, so packages, services and k3s
-// can be declared on them. The provider creates VMs (stopped; start-vm starts them), starts them,
-// grows their disks and changes their vCPUs and memory. It never shrinks a disk, replaces an image
-// or changes a network, and it never touches a VM without its marker. Deleting, restarting and
-// taking over a VM are explicit operations (explicit.go): a person asks for each by name.
+// can be declared on them. The provider creates VMs (as linked clones of a template of their
+// image), starts them or shuts them down as declared, grows their disks and changes their vCPUs
+// and memory. It never shrinks a disk, replaces an image, changes a network or moves a VM, and it
+// never touches a VM without its marker. Deleting, restarting, stopping and taking over a VM are
+// explicit operations (explicit.go): a person asks for each by name. A VM that Terraform made can
+// be imported and taken over (imports.go).
 //
 // Its guard (guard.go) checks the cluster before and after every apply: the boundary of pool, VMID
 // range and node; the operating token's permissions; the room on the node; and that no guest
@@ -18,7 +24,6 @@
 package proxmox
 
 import (
-	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -27,10 +32,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/ieyoukan/mamela/provider/kit"
 	"github.com/ieyoukan/mamela/provider/protocol"
-	"github.com/ieyoukan/mamela/provider/sdk"
 )
 
 // Name and Version are the provider's, as its manifest and Pome name them.
@@ -41,21 +45,24 @@ const (
 	API = "proxmox"
 )
 
-// Kind is the resource kind.
+// Kind is the resource kind of a VM.
 const Kind protocol.ResourceKind = "ProxmoxVM"
 
-// Operations.
+// Operations of a VM that a plan carries out.
 const (
-	OpCreate protocol.Op = "create-vm"
-	OpStart  protocol.Op = "start-vm"
-	OpGrow   protocol.Op = "grow-vm-disk"
-	OpResize protocol.Op = "resize-vm"
-	OpTag    protocol.Op = "tag-vm"
+	OpCreate   protocol.Op = "create-vm"
+	OpStart    protocol.Op = "start-vm"
+	OpShutdown protocol.Op = "shutdown-vm" // a VM declared stopped that runs: ask its guest to power off
+	OpGrow     protocol.Op = "grow-vm-disk"
+	OpResize   protocol.Op = "resize-vm"
+	OpTag      protocol.Op = "tag-vm"
 
 	// Never carried out (the manifest says why); a difference is shown and denied.
 	OpShrink        protocol.Op = "shrink-vm-disk"
 	OpReplaceImage  protocol.Op = "replace-vm-image"
 	OpChangeNetwork protocol.Op = "change-vm-network"
+	OpMove          protocol.Op = "move-vm"
+	OpCreateNoImage protocol.Op = "create-vm-without-image"
 )
 
 // Image is a pinned cloud image a VM can be created from. Changing an entry is a reviewed change
@@ -85,41 +92,64 @@ func VolumeName(name string, img Image) string {
 }
 
 // Spec is a declared VM: where it goes (the site's settings, which a declaration states in full)
-// and what it is.
+// and what it is. Its JSON is what the Pome's Proxmox.vm writes; the Pome's Proxmox.Kinds module is
+// generated from this type (its tags: kit.SpecOf).
 type Spec struct {
-	Node         string           `json:"node"`
-	Pool         string           `json:"pool"`
-	DiskStorage  string           `json:"diskStorage"`
-	ImageStorage string           `json:"imageStorage"`
-	Bridge       string           `json:"bridge"`
-	Tag          string           `json:"tag"`
-	VMIDMin      int64            `json:"vmidMin"`
-	VMIDMax      int64            `json:"vmidMax"`
-	CPU          int64            `json:"cpu"`
-	MemoryMiB    int64            `json:"memoryMiB"`
-	DiskGiB      int64            `json:"diskGiB"`
-	Image        string           `json:"image"`
-	Network      protocol.Network `json:"network"`
+	Node         string `json:"node" doc:"the Proxmox VE node"`
+	Pool         string `json:"pool" doc:"the pool Mamela's token may change"`
+	DiskStorage  string `json:"diskStorage" doc:"the storage of its disk"`
+	ImageStorage string `json:"imageStorage" doc:"the storage of the images and seeds it is made from"`
+	Bridge       string `json:"bridge" doc:"the bridge of its network"`
+	Tag          string `json:"tag" doc:"the tag Mamela puts on its VMs"`
+	VMIDMin      int64  `json:"vmidMin" doc:"the first VMID Mamela may use"`
+	VMIDMax      int64  `json:"vmidMax" doc:"the last VMID Mamela may use"`
+	CPU          int64  `json:"cpu" doc:"vCPUs (cores of one socket)"`
+	MemoryMiB    int64  `json:"memoryMiB" doc:"memory in MiB"`
+	DiskGiB      int64  `json:"diskGiB" doc:"the disk (scsi0) in GiB"`
+	// Image is one of Images; none for a VM imported from Terraform: Mamela never creates one
+	// without an image.
+	Image   string           `json:"image,omitempty" doc:"the pinned image it is made from (ubuntu-24.04); none for a VM imported to adopt"`
+	Network protocol.Network `json:"network" doc:"how it gets its address (given once, when it is created)"`
 	// Template is the ProxmoxTemplate (by name) the VM is a linked clone of; none: the image is
 	// imported into the VM's own disk.
-	Template string `json:"template,omitempty"`
+	Template string `json:"template,omitempty" mamela:"ref=ProxmoxTemplate" doc:"the template it is a linked clone of"`
+	// Stopped keeps the VM stopped: a running one is shut down (its guest is asked to power off).
+	Stopped bool `json:"stopped,omitzero" doc:"keep it stopped (a running one is shut down)"`
 }
 
-// State is what is observed of a declared VM.
+// State is what is observed of a VM.
 type State struct {
 	CPU       int64  `json:"cpu,omitempty"`
 	MemoryMiB int64  `json:"memoryMiB,omitempty"`
 	DiskGiB   int64  `json:"diskGiB,omitempty"`
 	Image     string `json:"image,omitempty"`
 	Network   string `json:"network,omitempty"`
-	Tagged    bool   `json:"tagged,omitempty"`
+	Tagged    bool   `json:"tagged,omitempty"` // it has the declared tag
 	Running   bool   `json:"running,omitempty"`
 	Seeded    bool   `json:"seeded,omitempty"` // its seed is attached
+	// Pool is the pool it is in; Tags its tags.
+	Pool string   `json:"pool,omitempty"`
+	Tags []string `json:"tags,omitempty"`
+	// Origin is, for a VM to adopt, who made it: Mamela's built-in provider ("builtin"), or another
+	// tool ("unmarked": found by the IDs it was imported with). Sockets, DiskStorage and Bridge
+	// are what adopting an unmarked one checks.
+	Origin      string `json:"origin,omitempty"`
+	Sockets     int64  `json:"sockets,omitempty"`
+	DiskStorage string `json:"diskStorage,omitempty"`
+	Bridge      string `json:"bridge,omitempty"`
 	// For a VM that does not exist yet: the free VMIDs of its range, and whether its image is
 	// already on the image storage.
 	FreeVMIDs     []int64 `json:"freeVmids,omitempty"`
 	ImageUploaded bool    `json:"imageUploaded,omitempty"`
+	// Uptime is what List read, for the observed node; it is not reported in the state.
+	Uptime int64 `json:"uptime,omitempty"`
 }
+
+// Origins of a VM to adopt.
+const (
+	originBuiltin  = "builtin"
+	originUnmarked = "unmarked"
+)
 
 // Calls.
 var (
@@ -134,80 +164,16 @@ var (
 	resizeDisk = protocol.Call{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/resize", Form: []string{"disk", "size", "digest"}}
 	setConfig  = protocol.Call{Method: "PUT", Path: "/nodes/{node}/qemu/{vmid}/config"}
 	// What each operation sends of the configuration: only what it changes.
-	setSize   = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"cores", "memory", "digest"}}
-	setTags   = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"tags", "digest"}}
-	setMarker = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"description", "tags", "digest"}}
-	startVM   = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/start"}
-	rebootVM  = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/reboot"}
+	setSize    = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"cores", "memory", "digest"}}
+	setTags    = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"tags", "digest"}}
+	setMarker  = protocol.Call{Method: "PUT", Path: setConfig.Path, Form: []string{"description", "tags", "digest"}}
+	startVM    = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/start"}
+	shutdownVM = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/shutdown"}
+	rebootVM   = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu/{vmid}/status/reboot"}
 )
 
-// Provider implements sdk.Provider.
-type Provider struct {
-	// Poll is how long to wait between task status reads (default 2s); Timeout bounds a task
-	// (default 2 hours: importing an image can take long).
-	Poll, Timeout time.Duration
-}
-
-// Manifest implements sdk.Provider.
-func (Provider) Manifest() protocol.Manifest {
-	pool := func(caps ...string) []protocol.Need {
-		var out []protocol.Need
-		for _, c := range caps {
-			out = append(out, protocol.Need{Capability: c, Target: protocol.Target{Type: "proxmox-acl", Ref: "/pool/{pool}"}, Always: true})
-		}
-		return out
-	}
-	storage := func(ref string, caps ...string) []protocol.Need {
-		var out []protocol.Need
-		for _, c := range caps {
-			out = append(out, protocol.Need{Capability: c, Target: protocol.Target{Type: "proxmox-acl", Ref: "/storage/{" + ref + "}"}, Always: true})
-		}
-		return out
-	}
-	create := append(pool("VM.Allocate", "VM.Audit", "VM.Config.CPU", "VM.Config.Memory", "VM.Config.Disk", "VM.Config.HWType",
-		"VM.Config.Network", "VM.Config.Options"),
-		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)...)
-	create = append(create, protocol.Need{Capability: "SDN.Use", Target: protocol.Target{Type: "proxmox-acl", Ref: "/sdn/zones/localnetwork/{bridge}"}, Always: true})
-	// A VM cloned from a template: VM.Clone on the template, VM.Config.CDROM for its seed.
-	create = append(create, pool("VM.Clone", "VM.Config.CDROM")...)
-	finishClone := append(pool("VM.Config.CPU", "VM.Config.Memory", "VM.Config.CDROM"),
-		storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)
-	template := append(pool("VM.Allocate", "VM.Audit", "VM.Config.Disk", "VM.Config.HWType", "VM.Config.Network", "VM.Config.Options"),
-		append(storage("diskStorage", "Datastore.AllocateSpace"), storage("imageStorage", "Datastore.Audit", "Datastore.AllocateTemplate")...)...)
-	template = append(template, protocol.Need{Capability: "SDN.Use", Target: protocol.Target{Type: "proxmox-acl", Ref: "/sdn/zones/localnetwork/{bridge}"}, Always: true})
-	reads := []protocol.Call{listVMs, getConfig, getStatus, listContent, getTask}
-	with := func(calls ...protocol.Call) []protocol.Call { return append(slices.Clone(reads), calls...) }
-	unsupported := func(op protocol.Op, why string) protocol.Operation {
-		return protocol.Operation{Op: op, Support: protocol.Unsupported, Why: why}
-	}
-	return protocol.Manifest{
-		Schema: protocol.Schema, Provider: Name, Version: Version, API: API,
-		Observe:      append(pool("VM.Audit", "Pool.Audit"), storage("imageStorage", "Datastore.Audit")...),
-		ObserveCalls: []protocol.Call{listVMs, getConfig, listContent},
-		Guard:        &protocol.Guard{Calls: GuardCalls},
-		Scripts:      Scripts,
-		Kinds: []protocol.Kind{{Kind: Kind, Node: true, Operations: []protocol.Operation{
-			{Op: OpCreate, Support: protocol.Supported, Needs: create, Calls: with(upload, createVM, cloneVM, configureNew, resizeDisk)},
-			{Op: OpFinishClone, Support: protocol.Supported, Needs: finishClone, Calls: with(upload, setupClone)},
-			{Op: OpStart, Support: protocol.Supported, Needs: pool("VM.PowerMgmt"), Calls: with(startVM)},
-			{Op: OpGrow, Support: protocol.Supported, Needs: append(pool("VM.Config.Disk"), storage("diskStorage", "Datastore.AllocateSpace")...), Calls: with(resizeDisk)},
-			{Op: OpResize, Support: protocol.Supported, Needs: pool("VM.Config.CPU", "VM.Config.Memory", "VM.PowerMgmt"), Calls: with(setSize, rebootVM)},
-			{Op: OpTag, Support: protocol.Supported, Needs: pool("VM.Config.Options"), Calls: with(setTags)},
-			unsupported(OpShrink, "shrinking a disk can destroy data"),
-			unsupported(OpReplaceImage, "changing the image would mean replacing the VM and its data"),
-			unsupported(OpChangeNetwork, "a VM gets its network once, when it is created"),
-			{Op: OpDelete, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt", "VM.Allocate"), Calls: with(stopVM, deleteVM)},
-			{Op: OpReboot, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(rebootVM)},
-			{Op: OpReset, Support: protocol.Supported, Explicit: true, Needs: pool("VM.PowerMgmt"), Calls: with(resetVM)},
-			{Op: OpAdopt, Support: protocol.Supported, Explicit: true, Adopts: true, Needs: pool("VM.Config.Options"), Calls: with(setMarker)},
-		}}, {Kind: KindTemplate, Operations: []protocol.Operation{
-			{Op: OpCreateTemplate, Support: protocol.Supported, Needs: template, Calls: with(upload, createTemplateVM, setTags, convertTemplate)},
-			{Op: OpFinishTemplate, Support: protocol.Supported, Needs: pool("VM.Allocate", "VM.Config.Options"), Calls: with(setTags, convertTemplate)},
-			unsupported(OpReplaceImage, "a template keeps its image: the Pome declares a template of the new image for the VMs of it"),
-			{Op: OpDeleteTemplate, Support: protocol.Supported, Explicit: true, Needs: pool("VM.Allocate"), Calls: with(deleteVM)},
-		}}},
-	}
-}
+// reads are what every kind lists its objects with (kit adds them to every operation).
+var reads = []protocol.Call{listVMs, getConfig, getStatus, listContent, getTask}
 
 // Marker is the first line of the description of the VMs this provider created; the lines after
 // it record the VM's name, image and network.
@@ -241,6 +207,14 @@ func parseMarkerAfter(first, description string) (marker, bool) {
 	return m, m.Name != ""
 }
 
+// marked says whether a description starts with any marker of Mamela's (this provider's, a
+// template's, the built-in provider's), finished or not.
+func marked(description string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(description), "\n")
+	first = strings.TrimSpace(first)
+	return first == Marker || first == TemplateMarker || first == OldMarker
+}
+
 // NetworkString is a network as Mamela shows it ("dhcp", "static 192.0.2.10/24 via ... dns ...").
 func NetworkString(n protocol.Network) string {
 	if n.Mode != "static" {
@@ -257,123 +231,6 @@ type resource struct {
 	Type   string `json:"type"`
 	Status string `json:"status"`
 	Uptime int64  `json:"uptime"`
-}
-
-// Observe implements sdk.Provider.
-func (p Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveParams) (protocol.ObserveResult, error) {
-	vms, err := list(ctx, h)
-	if err != nil {
-		return protocol.ObserveResult{}, err
-	}
-	var out protocol.ObserveResult
-	mine := map[int64]bool{}
-	cs := &configs{ctx: ctx, h: h, seen: map[int64]vmConfig{}}
-	for _, r := range in.Resources {
-		if r.Kind == KindTemplate {
-			o, err := observeTemplate(cs, r, vms, mine, in.Claimed)
-			if err != nil {
-				return out, fmt.Errorf("%s: %w", r.ID, err)
-			}
-			out.Resources = append(out.Resources, o)
-			continue
-		}
-		s, err := spec(r.Spec)
-		if err != nil {
-			return out, fmt.Errorf("%s: %w", r.ID, err)
-		}
-		o := protocol.Observed{ID: r.ID, Kind: Kind, Name: r.Name}
-		found := false
-		for _, vmid := range slices.Sorted(maps.Keys(vms)) {
-			vm := vms[vmid]
-			if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax {
-				continue
-			}
-			cfg, err := cs.of(vm.Node, vmid)
-			if err != nil {
-				return out, err
-			}
-			if m, ok := parseMarker(cfg.Description); ok && m.Name == r.Name {
-				fill(&o, vm, cfg, m, s.Tag)
-				o.IDs["storage"] = s.ImageStorage // its seeds' storage
-				mine[vmid], found = true, true
-				break
-			}
-		}
-		if !found {
-			// A VM of Mamela's built-in provider with this name: adoptable (adopt-vm), never
-			// created again.
-			for _, vmid := range slices.Sorted(maps.Keys(vms)) {
-				vm := vms[vmid]
-				if vm.Pool != s.Pool || vm.Node != s.Node || vmid < s.VMIDMin || vmid > s.VMIDMax || mine[vmid] {
-					continue
-				}
-				cfg, err := cs.of(vm.Node, vmid)
-				if err != nil {
-					return out, err
-				}
-				if m, ok := parseOldMarker(cfg.Description); ok && m.Name == r.Name {
-					fill(&o, vm, cfg, m, s.Tag)
-					o.Owned, o.Unfinished, o.Adoptable, o.Node = false, false, true, nil
-					mine[vmid], found = true, true
-					break
-				}
-			}
-		}
-		if !found {
-			st := State{FreeVMIDs: freeVMIDs(vms, in.Claimed, s.Node, s.VMIDMin, s.VMIDMax, false)}
-			img, ok := Images[s.Image]
-			if !ok {
-				return out, fmt.Errorf("%s: image %q is not one of this provider's (%s)", r.ID, s.Image, strings.Join(slices.Sorted(maps.Keys(Images)), ", "))
-			}
-			if st.ImageUploaded, err = hasVolume(ctx, h, s.Node, s.ImageStorage, "import", VolumeName(s.Image, img)); err != nil {
-				return out, err
-			}
-			o.State, _ = json.Marshal(st, json.Deterministic(true))
-		}
-		out.Resources = append(out.Resources, o)
-	}
-	// What it created and is no longer declared: reported, so that Mamela keeps it.
-	for _, vmid := range slices.Sorted(maps.Keys(vms)) {
-		vm := vms[vmid]
-		if mine[vmid] || vm.Pool == "" {
-			continue
-		}
-		cfg, err := cs.of(vm.Node, vmid)
-		if err != nil {
-			return out, err
-		}
-		if m, ok := parseTemplateMarker(cfg.Description); ok {
-			o := protocol.Observed{ID: string(KindTemplate) + " " + m.Name, Kind: KindTemplate, Name: m.Name}
-			if err := fillTemplate(cs, &o, vm, cfg, m, "", vms); err != nil {
-				return out, err
-			}
-			out.Resources = append(out.Resources, o)
-			continue
-		}
-		m, ok := parseMarker(cfg.Description)
-		if !ok {
-			continue
-		}
-		o := protocol.Observed{ID: string(Kind) + " " + m.Name, Kind: Kind, Name: m.Name}
-		fill(&o, vm, cfg, m, "")
-		out.Resources = append(out.Resources, o)
-	}
-	return out, nil
-}
-
-func fill(o *protocol.Observed, vm resource, cfg vmConfig, m marker, tag string) {
-	running := vm.Status == "running"
-	tagged := tag != "" && slices.Contains(cfg.Tags, tag)
-	o.Exists, o.Version = true, cfg.Digest
-	o.Owned, o.Unfinished = Ownership(tag == "" || tagged)
-	o.IDs = ids(vm.Node, vm.VMID)
-	o.Node = &protocol.ObservedNode{ID: vm.VMID, Running: running}
-	if running {
-		o.Node.UptimeSeconds = vm.Uptime
-	}
-	st := State{CPU: cfg.Cores, MemoryMiB: cfg.Memory, DiskGiB: cfg.DiskGiB, Image: m.Image, Network: m.Network,
-		Tagged: tagged, Running: running, Seeded: cfg.IDE2 != ""}
-	o.State, _ = json.Marshal(st, json.Deterministic(true))
 }
 
 // Ownership is the provider's claim on a VM that carries its marker, in the pool and the VMID
@@ -395,422 +252,6 @@ func ids(node string, vmid int64) map[string]string {
 // another VM's disk import.
 const startReason = "start it (after every VM of the run is created)"
 
-// Diff implements sdk.Provider.
-func (Provider) Diff(ctx context.Context, in protocol.DiffParams) (protocol.DiffResult, error) {
-	obs := map[string]protocol.Observed{}
-	for _, o := range in.Observed {
-		obs[o.ID] = o
-	}
-	var out protocol.DiffResult
-	desired := slices.Clone(in.Desired)
-	slices.SortFunc(desired, func(a, b protocol.Resource) int { return strings.Compare(a.ID, b.ID) })
-	taken := map[int64]bool{}
-	uploading := map[string]bool{} // images an earlier create of this diff uploads
-	for _, r := range desired {
-		if r.Kind == KindTemplate {
-			cs, err := diffTemplate(r, obs[r.ID], uploading)
-			if err != nil {
-				return out, fmt.Errorf("%s: %w", r.ID, err)
-			}
-			out.Changes = append(out.Changes, cs...)
-			continue
-		}
-		s, err := spec(r.Spec)
-		if err != nil {
-			return out, fmt.Errorf("%s: %w", r.ID, err)
-		}
-		o := obs[r.ID]
-		var st State
-		if len(o.State) > 0 {
-			if err := json.Unmarshal(o.State, &st); err != nil {
-				return out, fmt.Errorf("%s: %w", r.ID, err)
-			}
-		}
-		switch {
-		case !o.Exists:
-			vmid := int64(0)
-			for _, id := range st.FreeVMIDs {
-				if !taken[id] {
-					vmid = id
-					break
-				}
-			}
-			if vmid == 0 {
-				return out, fmt.Errorf("%s: no free VMID in %d..%d", r.ID, s.VMIDMin, s.VMIDMax)
-			}
-			taken[vmid] = true
-			made := protocol.Change{}
-			if s.Template != "" {
-				t, ok := in.Dependencies[string(KindTemplate)+" "+s.Template]
-				if !ok || !t.Exists {
-					return out, fmt.Errorf("%s: its template %s is not among its dependencies (the Pome declares it; plan with a Proxmox Pome that does)", r.ID, s.Template)
-				}
-				var ts TemplateState
-				json.Unmarshal(t.State, &ts)
-				if ts.Image != s.Image || t.IDs["node"] != s.Node {
-					return out, fmt.Errorf("%s: template %s is of %s on %s, the VM is of %s on %s", r.ID, s.Template, ts.Image, t.IDs["node"], s.Image, s.Node)
-				}
-				tid, _ := strconv.ParseInt(t.IDs["vmid"], 10, 64)
-				made = cloneChange(r, s, vmid, tid)
-			} else {
-				// An image is uploaded by one change only: another change that finds it on the
-				// storage could not tell whether it uploaded it (lookup must tell its own effect).
-				key := s.Node + "/" + s.ImageStorage + "/" + s.Image
-				if uploading[key] {
-					st.ImageUploaded = true
-				}
-				uploading[key] = true
-				made = create(r, s, st, vmid)
-			}
-			out.Changes = append(out.Changes, made, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart,
-				IDs: ids(s.Node, vmid), Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}},
-				Reasons: []string{startReason}, Late: true})
-		case !o.Owned:
-			continue
-		default:
-			id := o.IDs
-			switch {
-			case !st.Seeded && s.Template != "":
-				// A clone interrupted before its seed and size: one change, on its configuration.
-				out.Changes = append(out.Changes, finishClone(r, s, o))
-			case st.DiskGiB < s.DiskGiB:
-				// One change at a time on the configuration: each needs the version it was planned on.
-				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpGrow, IDs: id, Precondition: o.Version,
-					Reasons:  []string{fmt.Sprintf("disk %d -> %d GiB", st.DiskGiB, s.DiskGiB)},
-					Requests: []protocol.Approved{{Method: resizeDisk.Method, Path: resizeDisk.Path, Params: map[string][]string{"disk": {"scsi0"}, "size": {fmt.Sprintf("%dG", s.DiskGiB)}, "digest": {o.Version}}}}})
-			case st.CPU != s.CPU || st.MemoryMiB != s.MemoryMiB:
-				params := map[string][]string{"digest": {o.Version}}
-				var why []string
-				if st.CPU != s.CPU {
-					params["cores"] = []string{strconv.FormatInt(s.CPU, 10)}
-					why = append(why, fmt.Sprintf("vCPUs %d -> %d", st.CPU, s.CPU))
-				}
-				if st.MemoryMiB != s.MemoryMiB {
-					params["memory"] = []string{strconv.FormatInt(s.MemoryMiB, 10)}
-					why = append(why, fmt.Sprintf("memory %d -> %d MiB", st.MemoryMiB, s.MemoryMiB))
-				}
-				reqs := []protocol.Approved{{Method: setConfig.Method, Path: setConfig.Path, Params: params}}
-				if st.Running {
-					reqs = append(reqs, protocol.Approved{Method: rebootVM.Method, Path: rebootVM.Path})
-					why = append(why, "restart it to apply the new size")
-				}
-				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpResize, IDs: id, Precondition: o.Version, Reasons: why, Requests: reqs})
-			case !st.Tagged:
-				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpTag, IDs: id, Precondition: o.Version,
-					Reasons:  []string{"tag it " + s.Tag + " (a create was interrupted before tagging)"},
-					Requests: []protocol.Approved{{Method: setConfig.Method, Path: setConfig.Path, Params: map[string][]string{"tags": {s.Tag}, "digest": {o.Version}}}}})
-			}
-			if !st.Running {
-				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: OpStart, IDs: id,
-					Requests: []protocol.Approved{{Method: startVM.Method, Path: startVM.Path}}, Reasons: []string{startReason}, Late: true})
-			}
-			// What it never changes is still a difference: reported as a change of an unsupported
-			// operation (nothing to send), which Mamela shows and denies.
-			unsupported := func(op protocol.Op, why string) {
-				out.Changes = append(out.Changes, protocol.Change{Resource: r.ID, Kind: Kind, Op: op, IDs: id, Reasons: []string{why}})
-			}
-			if st.DiskGiB > s.DiskGiB {
-				unsupported(OpShrink, fmt.Sprintf("disk %d -> %d GiB", st.DiskGiB, s.DiskGiB))
-			}
-			if st.Image != s.Image {
-				unsupported(OpReplaceImage, fmt.Sprintf("image %s -> %s", st.Image, s.Image))
-			}
-			if want := NetworkString(s.Network); st.Network != want {
-				unsupported(OpChangeNetwork, fmt.Sprintf("network %s -> %s", st.Network, want))
-			}
-		}
-	}
-	return out, nil
-}
-
-// create is the change that makes a VM: upload the image (unless it is there) and the VM's seed,
-// create the VM from them (stopped, with the marker), grow its disk, tag it.
-func create(r protocol.Resource, s Spec, st State, vmid int64) protocol.Change {
-	img := Images[s.Image]
-	vol := VolumeName(s.Image, img)
-	c := protocol.Change{Resource: r.ID, Kind: Kind, Op: OpCreate,
-		IDs: map[string]string{"node": s.Node, "vmid": strconv.FormatInt(vmid, 10), "storage": s.ImageStorage},
-		Reasons: []string{fmt.Sprintf("VM %d: %d vCPU, %d MiB, %d GiB from %s, network %s, in pool %s", vmid, s.CPU, s.MemoryMiB, s.DiskGiB,
-			s.Image, NetworkString(s.Network), s.Pool)},
-		Artifacts: []protocol.Artifact{{ID: "seed", Kind: protocol.ArtifactSeed, Node: r.Name, NodeID: vmid, Network: &s.Network}}}
-	if !st.ImageUploaded {
-		c.Artifacts = append([]protocol.Artifact{{ID: "image", Kind: protocol.ArtifactDownload, URL: img.URL, SHA256: img.SHA256, Name: vol}}, c.Artifacts...)
-		c.Requests = append(c.Requests, protocol.Approved{Method: upload.Method, Path: upload.Path, Upload: "image",
-			Params: map[string][]string{"content": {"import"}, "checksum-algorithm": {"sha256"}, "checksum": {"{artifact:image.sha256}"}}})
-	}
-	c.Requests = append(c.Requests,
-		protocol.Approved{Method: upload.Method, Path: upload.Path, Upload: "seed",
-			Params: map[string][]string{"content": {"iso"}, "checksum-algorithm": {"sha256"}, "checksum": {"{artifact:seed.sha256}"}}},
-		protocol.Approved{Method: createVM.Method, Path: createVM.Path, Params: map[string][]string{
-			"vmid": {strconv.FormatInt(vmid, 10)}, "name": {r.Name}, "pool": {s.Pool},
-			"description": {marker{Name: r.Name, Image: s.Image, Network: NetworkString(s.Network)}.String()},
-			"ostype":      {"l26"}, "cores": {strconv.FormatInt(s.CPU, 10)}, "memory": {strconv.FormatInt(s.MemoryMiB, 10)},
-			"scsihw": {"virtio-scsi-single"}, "scsi0": {s.DiskStorage + ":0,import-from=" + s.ImageStorage + ":import/" + vol + ",discard=on"},
-			"boot": {"order=scsi0"}, "serial0": {"socket"}, "vga": {"serial0"}, "net0": {"virtio,bridge=" + s.Bridge}, "onboot": {"0"},
-			"ide2": {s.ImageStorage + ":iso/{artifact:seed.name},media=cdrom"}, "agent": {"enabled=1"}}},
-		protocol.Approved{Method: resizeDisk.Method, Path: resizeDisk.Path, Params: map[string][]string{"disk": {"scsi0"}, "size": {fmt.Sprintf("%dG", s.DiskGiB)}}},
-		protocol.Approved{Method: setConfig.Method, Path: setConfig.Path, Params: map[string][]string{"tags": {s.Tag}}},
-	)
-	return c
-}
-
-// Apply implements sdk.Provider: it sends the approved requests, in order, each at most once, with
-// the facts of the artifacts filled in, and skips what is already in effect (an earlier apply that
-// was interrupted).
-func (p Provider) Apply(ctx context.Context, h *sdk.Host, in protocol.ApplyParams) (protocol.ApplyResult, error) {
-	c := in.Change
-	node := c.IDs["node"]
-	vmid, err := strconv.ParseInt(c.IDs["vmid"], 10, 64)
-	if err != nil || node == "" {
-		return protocol.ApplyResult{}, errors.New("a change names one VM on one node")
-	}
-	if explicit(c.Op) {
-		if err := ensureOwn(ctx, h, c, node, vmid); err != nil {
-			return protocol.ApplyResult{}, err
-		}
-	}
-	ready := map[string]protocol.ArtifactInfo{}
-	for _, a := range c.Artifacts {
-		info, err := h.Artifact(ctx, a.ID)
-		if err != nil {
-			return protocol.ApplyResult{}, err
-		}
-		ready[a.ID] = info
-	}
-	var done []string
-	for _, a := range c.Requests {
-		params, err := protocol.FillArtifacts(a.Params, ready)
-		if err != nil {
-			return protocol.ApplyResult{}, err
-		}
-		skip, err := p.inEffect(ctx, h, node, c.IDs["storage"], vmid, a, params, ready)
-		if err != nil {
-			return protocol.ApplyResult{}, err
-		}
-		if skip {
-			continue
-		}
-		path := strings.NewReplacer("{node}", node, "{vmid}", strconv.FormatInt(vmid, 10), "{storage}", c.IDs["storage"], "{template}", c.IDs["template"]).Replace(a.Path)
-		req := protocol.HostRequest{Method: a.Method, Path: path, Form: params, Upload: a.Upload}
-		if a.Method == "DELETE" { // Proxmox reads a DELETE's parameters from the query
-			req.Form, req.Query = nil, params
-		}
-		var data jsontext.Value
-		if err := call(ctx, h, req, &data); err != nil {
-			return protocol.ApplyResult{}, err
-		}
-		// Proxmox answers a long operation with its task ID: wait for it to end.
-		var upid string
-		if json.Unmarshal(data, &upid) == nil && strings.HasPrefix(upid, "UPID:") {
-			if err := p.wait(ctx, h, node, upid); err != nil {
-				return protocol.ApplyResult{}, fmt.Errorf("%s %s: %w", a.Method, path, err)
-			}
-		}
-		done = append(done, a.Method+" "+path)
-	}
-	return protocol.ApplyResult{Message: fmt.Sprintf("VM %d: %s", vmid, strings.Join(done, ", "))}, nil
-}
-
-// inEffect says whether an approved request's effect is already there.
-func (p Provider) inEffect(ctx context.Context, h *sdk.Host, node, storage string, vmid int64, a protocol.Approved, params map[string][]string, ready map[string]protocol.ArtifactInfo) (bool, error) {
-	switch {
-	case a.Path == upload.Path:
-		return hasVolume(ctx, h, node, storage, contentOf(params), ready[a.Upload].Name)
-	case a.Path == createVM.Path:
-		vms, err := list(ctx, h)
-		if err != nil {
-			return false, err
-		}
-		vm, exists := vms[vmid]
-		if !exists {
-			return false, nil
-		}
-		cfg, err := config(ctx, h, vm.Node, vmid)
-		if err != nil {
-			return false, err
-		}
-		if m, ok := parseMarker(cfg.Description); ok && m.Name == params["name"][0] {
-			return true, nil // an earlier apply created it
-		}
-		if m, ok := parseTemplateMarker(cfg.Description); ok && m.Name == params["name"][0] {
-			return true, nil // an earlier apply created the template
-		}
-		return false, fmt.Errorf("VMID %d is taken by a VM this provider did not create; plan again", vmid)
-	case a.Path == cloneVM.Path:
-		vms, err := list(ctx, h)
-		if err != nil {
-			return false, err
-		}
-		vm, exists := vms[vmid]
-		if !exists {
-			return false, nil
-		}
-		cfg, err := config(ctx, h, vm.Node, vmid)
-		if err != nil {
-			return false, err
-		}
-		if m, ok := parseMarker(cfg.Description); ok && m.Name == params["name"][0] {
-			return true, nil // an earlier apply cloned it
-		}
-		return false, fmt.Errorf("VMID %d is taken by a VM this provider did not create; plan again", vmid)
-	case a.Path == convertTemplate.Path:
-		cfg, err := config(ctx, h, node, vmid)
-		if err != nil {
-			return false, err
-		}
-		return cfg.Template, nil
-	case a.Path == setConfig.Path && params["ide2"] != nil:
-		cfg, err := config(ctx, h, node, vmid)
-		if err != nil {
-			return false, err
-		}
-		return cfg.IDE2 != "" && strconv.FormatInt(cfg.Memory, 10) == params["memory"][0] && strconv.FormatInt(cfg.Cores, 10) == params["cores"][0], nil
-	case a.Path == resizeDisk.Path && params["digest"] == nil:
-		cfg, err := config(ctx, h, node, vmid)
-		if err != nil {
-			return false, err
-		}
-		want, _ := strconv.ParseInt(strings.TrimSuffix(params["size"][0], "G"), 10, 64)
-		return cfg.DiskGiB >= want, nil
-	case a.Path == setConfig.Path && params["digest"] == nil:
-		cfg, err := config(ctx, h, node, vmid)
-		if err != nil {
-			return false, err
-		}
-		return slices.Contains(cfg.Tags, params["tags"][0]), nil
-	case a.Path == startVM.Path, a.Path == stopVM.Path:
-		vms, err := list(ctx, h)
-		if err != nil {
-			return false, err
-		}
-		return (vms[vmid].Status == "running") == (a.Path == startVM.Path), nil
-	}
-	return false, nil
-}
-
-func contentOf(params map[string][]string) string {
-	if c := params["content"]; len(c) == 1 {
-		return c[0]
-	}
-	return ""
-}
-
-// wait reads a task's status until it ends, and fails unless it ended OK.
-func (p Provider) wait(ctx context.Context, h *sdk.Host, node, upid string) error {
-	poll, timeout := p.Poll, p.Timeout
-	if poll == 0 {
-		poll = 2 * time.Second
-	}
-	if timeout == 0 {
-		timeout = 2 * time.Hour
-	}
-	deadline := time.Now().Add(timeout)
-	for {
-		var st struct {
-			Status     string `json:"status"`
-			ExitStatus string `json:"exitstatus"`
-		}
-		if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/nodes/" + node + "/tasks/" + upid + "/status"}, &st); err != nil {
-			return err
-		}
-		if st.Status == "stopped" {
-			if st.ExitStatus != "OK" && !strings.HasPrefix(st.ExitStatus, "WARNINGS") {
-				return fmt.Errorf("task %s ended: %s", upid, st.ExitStatus)
-			}
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("task %s is still running after %s", upid, timeout)
-		}
-		time.Sleep(poll)
-	}
-}
-
-// Lookup implements sdk.Provider.
-func (p Provider) Lookup(ctx context.Context, h *sdk.Host, in protocol.LookupParams) (protocol.LookupResult, error) {
-	c := in.Change
-	node := c.IDs["node"]
-	vmid, _ := strconv.ParseInt(c.IDs["vmid"], 10, 64)
-	vms, err := list(ctx, h)
-	if err != nil {
-		return protocol.LookupResult{}, err
-	}
-	if explicit(c.Op) {
-		status, err := lookupExplicit(ctx, h, c, node, vmid, vms)
-		return protocol.LookupResult{Status: status}, err
-	}
-	vm, exists := vms[vmid]
-	if !exists {
-		// Not created; the uploads before the create may have landed (an image, the seed: Mamela
-		// names seeds mamela-seed-<node>-<vmid>-...).
-		if c.Op == OpCreate || c.Op == OpCreateTemplate {
-			for _, a := range c.Artifacts {
-				content, prefix := "iso", fmt.Sprintf("mamela-seed-%s-%d", a.Node, a.NodeID)
-				if a.Kind == protocol.ArtifactDownload {
-					content, prefix = "import", a.Name
-				}
-				found, err := hasVolumePrefix(ctx, h, node, c.IDs["storage"], content, prefix)
-				if err != nil {
-					return protocol.LookupResult{}, err
-				}
-				if found && slices.ContainsFunc(c.Requests, func(r protocol.Approved) bool { return r.Upload == a.ID }) {
-					return protocol.LookupResult{Status: protocol.LookupPartly}, nil
-				}
-			}
-		}
-		return protocol.LookupResult{Status: protocol.LookupNotDone}, nil
-	}
-	cfg, err := config(ctx, h, node, vmid)
-	if err != nil {
-		return protocol.LookupResult{}, err
-	}
-	_, vmMarked := parseMarker(cfg.Description)
-	_, templateMarked := parseTemplateMarker(cfg.Description)
-	if !vmMarked && !templateMarked {
-		return protocol.LookupResult{Status: protocol.LookupNotDone}, nil
-	}
-	want, got := 0, 0
-	check := func(ok bool) {
-		want++
-		if ok {
-			got++
-		}
-	}
-	for _, a := range c.Requests {
-		switch a.Path {
-		case createVM.Path, cloneVM.Path:
-			check(true)
-		case convertTemplate.Path:
-			check(cfg.Template)
-		case resizeDisk.Path:
-			n, _ := strconv.ParseInt(strings.TrimSuffix(a.Params["size"][0], "G"), 10, 64)
-			check(cfg.DiskGiB >= n)
-		case setConfig.Path:
-			if t := a.Params["tags"]; t != nil {
-				check(slices.Contains(cfg.Tags, t[0]))
-			}
-			if v := a.Params["cores"]; v != nil {
-				check(strconv.FormatInt(cfg.Cores, 10) == v[0])
-			}
-			if v := a.Params["memory"]; v != nil {
-				check(strconv.FormatInt(cfg.Memory, 10) == v[0])
-			}
-			if v := a.Params["ide2"]; v != nil {
-				check(cfg.IDE2 != "")
-			}
-		case startVM.Path:
-			check(vm.Status == "running")
-		}
-	}
-	switch {
-	case got == want:
-		return protocol.LookupResult{Status: protocol.LookupDone}, nil
-	case got == 0 && c.Op != OpCreate && c.Op != OpCreateTemplate:
-		return protocol.LookupResult{Status: protocol.LookupNotDone}, nil
-	}
-	return protocol.LookupResult{Status: protocol.LookupPartly}, nil
-}
-
 func spec(v jsontext.Value) (Spec, error) {
 	var s Spec
 	if err := json.Unmarshal(v, &s, json.RejectUnknownMembers(true)); err != nil {
@@ -825,6 +266,10 @@ func spec(v jsontext.Value) (Spec, error) {
 		return s, errors.New("cpu, memoryMiB (256 or more) and diskGiB must be positive")
 	case s.Network.Mode != "dhcp" && s.Network.Mode != "static":
 		return s, fmt.Errorf("network mode %q is not dhcp or static", s.Network.Mode)
+	case s.Image == "" && s.Template != "":
+		return s, errors.New("a VM without an image (imported to adopt) is not a clone of a template: remove template")
+	case s.Image == "":
+		return s, nil
 	}
 	img, ok := Images[s.Image]
 	if !ok {
@@ -836,15 +281,21 @@ func spec(v jsontext.Value) (Spec, error) {
 	return s, nil
 }
 
+// inRange says whether a VMID is in a declaration's range.
+func (s Spec) inRange(vmid int64) bool { return vmid >= s.VMIDMin && vmid <= s.VMIDMax }
+
 type vmConfig struct {
+	Name        string // the VM's name
 	Digest      string
 	Description string
 	Cores       int64
+	Sockets     int64
 	Memory      int64
 	DiskGiB     int64
 	Tags        []string
 	Template    bool   // a template
 	SCSI0, IDE2 string // the disk (a linked clone's names its template's base disk) and the seed
+	Net0        string
 }
 
 // UnmarshalJSON reads what it needs of a VM's configuration: numbers may come as strings.
@@ -864,19 +315,42 @@ func (c *vmConfig) UnmarshalJSON(b []byte) error {
 		n, _ := strconv.ParseInt(text(k), 10, 64)
 		return n
 	}
-	c.Digest, c.Description = text("digest"), text("description")
-	c.Cores, c.Memory = num("cores"), num("memory")
+	c.Name, c.Digest, c.Description = text("name"), text("digest"), text("description")
+	c.Cores, c.Sockets, c.Memory = num("cores"), num("sockets"), num("memory")
 	if c.Cores == 0 {
 		c.Cores = 1 // the Proxmox default
 	}
+	if c.Sockets == 0 {
+		c.Sockets = 1
+	}
 	c.DiskGiB = diskBytes(text("scsi0")) >> 30
-	c.SCSI0, c.IDE2 = text("scsi0"), text("ide2")
+	c.SCSI0, c.IDE2, c.Net0 = text("scsi0"), text("ide2"), text("net0")
 	c.Template = text("template") == "1"
 
 	for _, t := range strings.FieldsFunc(text("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
 		c.Tags = append(c.Tags, t)
 	}
 	return nil
+}
+
+// diskStorage is the storage of a drive ("local-lvm:vm-7001-disk-0,size=10G": local-lvm).
+func diskStorage(drive string) string {
+	vol, _, _ := strings.Cut(drive, ",")
+	st, _, ok := strings.Cut(vol, ":")
+	if !ok {
+		return ""
+	}
+	return st
+}
+
+// bridgeOf is the bridge of a network device ("virtio=BC:24:11:00:00:01,bridge=vmbr0": vmbr0).
+func bridgeOf(net string) string {
+	for part := range strings.SplitSeq(net, ",") {
+		if b, ok := strings.CutPrefix(part, "bridge="); ok {
+			return b
+		}
+	}
+	return ""
 }
 
 // diskBytes reads size=<n>[KMGT] from a drive option (Proxmox writes 3584M after an import, 10G
@@ -887,35 +361,69 @@ func diskBytes(drive string) int64 {
 		if !ok || v == "" {
 			continue
 		}
-		mult := int64(1)
-		switch v[len(v)-1] {
-		case 'K':
-			mult = 1 << 10
-		case 'M':
-			mult = 1 << 20
-		case 'G':
-			mult = 1 << 30
-		case 'T':
-			mult = 1 << 40
-		}
-		n, err := strconv.ParseInt(strings.TrimRight(v, "KMGT"), 10, 64)
-		if err != nil {
-			return 0
-		}
-		return n * mult
+		return sizeBytes(v)
 	}
 	return 0
 }
 
-func config(ctx context.Context, h *sdk.Host, node string, vmid int64) (vmConfig, error) {
-	var c vmConfig
-	err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: fmt.Sprintf("/nodes/%s/qemu/%d/config", node, vmid)}, &c)
-	return c, err
+// sizeBytes reads a size: a number with K, M, G or T after it (bytes without).
+func sizeBytes(v string) int64 {
+	if v == "" {
+		return 0
+	}
+	mult := int64(1)
+	switch v[len(v)-1] {
+	case 'K':
+		mult = 1 << 10
+	case 'M':
+		mult = 1 << 20
+	case 'G':
+		mult = 1 << 30
+	case 'T':
+		mult = 1 << 40
+	}
+	n, err := strconv.ParseInt(strings.TrimRight(v, "KMGT"), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n * mult
 }
 
-func list(ctx context.Context, h *sdk.Host) (map[int64]resource, error) {
+// --- reads ---
+
+// get sends a read and decodes Proxmox's {"data": ...} into out.
+func get(c *kit.Client, call protocol.Call, ids map[string]string, params map[string][]string, out any) error {
+	body, err := c.Read(call, ids, params)
+	if err != nil {
+		return fmt.Errorf("%s %s %v: %w", call.Method, call.Path, ids, err)
+	}
+	return data(call, body, out)
+}
+
+// data decodes Proxmox's {"data": ...} answer into out (nothing when out is nil).
+func data(call protocol.Call, body []byte, out any) error {
+	var env struct {
+		Data jsontext.Value `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return fmt.Errorf("%s %s: the answer is not Proxmox's {\"data\": ...}: %w", call.Method, call.Path, err)
+	}
+	if out == nil || len(env.Data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(env.Data, out)
+}
+
+func config(c *kit.Client, node string, vmid int64) (vmConfig, error) {
+	var cfg vmConfig
+	err := get(c, getConfig, ids(node, vmid), nil, &cfg)
+	return cfg, err
+}
+
+// list is every VM (qemu) the token sees, by VMID.
+func list(c *kit.Client) (map[int64]resource, error) {
 	var rs []resource
-	if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/cluster/resources", Query: map[string][]string{"type": {"vm"}}}, &rs); err != nil {
+	if err := get(c, listVMs, nil, map[string][]string{"type": {"vm"}}, &rs); err != nil {
 		return nil, err
 	}
 	out := map[int64]resource{}
@@ -927,22 +435,22 @@ func list(ctx context.Context, h *sdk.Host) (map[int64]resource, error) {
 	return out, nil
 }
 
-func hasVolume(ctx context.Context, h *sdk.Host, node, storage, content, file string) (bool, error) {
-	vols, err := volumes(ctx, h, node, storage, content)
+func hasVolume(c *kit.Client, node, storage, content, file string) (bool, error) {
+	vols, err := volumes(c, node, storage, content)
 	return slices.Contains(vols, storage+":"+content+"/"+file), err
 }
 
-func hasVolumePrefix(ctx context.Context, h *sdk.Host, node, storage, content, prefix string) (bool, error) {
-	vols, err := volumes(ctx, h, node, storage, content)
+func hasVolumePrefix(c *kit.Client, node, storage, content, prefix string) (bool, error) {
+	vols, err := volumes(c, node, storage, content)
 	return slices.ContainsFunc(vols, func(v string) bool { return strings.HasPrefix(v, storage+":"+content+"/"+prefix) }), err
 }
 
-func volumes(ctx context.Context, h *sdk.Host, node, storage, content string) ([]string, error) {
+func volumes(c *kit.Client, node, storage, content string) ([]string, error) {
 	var vols []struct {
 		VolID string `json:"volid"`
 	}
-	if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: fmt.Sprintf("/nodes/%s/storage/%s/content", node, storage),
-		Query: map[string][]string{"content": {content}}}, &vols); err != nil {
+	if err := get(c, listContent, map[string]string{"node": node, "storage": storage},
+		map[string][]string{"content": {content}}, &vols); err != nil {
 		return nil, err
 	}
 	var out []string
@@ -952,23 +460,38 @@ func volumes(ctx context.Context, h *sdk.Host, node, storage, content string) ([
 	return out, nil
 }
 
-// call sends a request and decodes Proxmox's {"data": ...}.
-func call(ctx context.Context, h *sdk.Host, r protocol.HostRequest, out any) error {
-	resp, err := h.Request(ctx, r)
-	if err != nil {
-		return err
+// reader reads VMs and their configurations: once per observation (the kinds' lists, what is
+// missing, what is found), and afresh otherwise (applying, looking up).
+type reader struct {
+	c    *kit.Client
+	vms  map[int64]resource
+	cfgs map[int64]vmConfig
+}
+
+func (r *reader) list() (map[int64]resource, error) {
+	if r.vms != nil {
+		return r.vms, nil
 	}
-	if resp.Status != 200 {
-		return fmt.Errorf("%s %s: status %d %s: %.300s", r.Method, r.Path, resp.Status, resp.Reason, resp.Body)
+	vms, err := list(r.c)
+	if err == nil && r.cfgs != nil {
+		r.vms = vms // an observation's reader keeps what it read
 	}
-	var env struct {
-		Data jsontext.Value `json:"data"`
+	return vms, err
+}
+
+func (r *reader) config(node string, vmid int64) (vmConfig, error) {
+	if cfg, ok := r.cfgs[vmid]; ok {
+		return cfg, nil
 	}
-	if err := json.Unmarshal([]byte(resp.Body), &env); err != nil {
-		return fmt.Errorf("%s %s: %w", r.Method, r.Path, err)
+	cfg, err := config(r.c, node, vmid)
+	if err == nil && r.cfgs != nil {
+		r.cfgs[vmid] = cfg
 	}
-	if out == nil || len(env.Data) == 0 {
-		return nil
-	}
-	return json.Unmarshal(env.Data, out)
+	return cfg, err
+}
+
+// encode is a state as kit reports it.
+func encode(v any) jsontext.Value {
+	b, _ := json.Marshal(v, json.Deterministic(true))
+	return b
 }

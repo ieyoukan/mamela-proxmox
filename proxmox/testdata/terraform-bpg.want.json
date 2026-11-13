@@ -1,0 +1,17 @@
+{
+  "imported": {
+    "module.k8s.proxmox_virtual_environment_vm.node[0]": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":4,\"memoryMiB\":8192,\"diskGiB\":40,\"network\":{\"mode\":\"static\",\"address\":\"192.0.2.31/24\",\"gateway\":\"192.0.2.1\",\"dns\":[\"192.0.2.1\",\"192.0.2.2\"]}}",
+    "proxmox_virtual_environment_vm.minimal": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":1,\"memoryMiB\":512,\"diskGiB\":8,\"network\":{\"mode\":\"dhcp\"}}"
+  },
+  "skipped": {
+    "module.k8s.proxmox_virtual_environment_vm.node[1]": "it is on node pve2, and Mamela's boundary is node pve1",
+    "proxmox_virtual_environment_vm.app": "it is in pool \"prod\", not Mamela's pool lab",
+    "proxmox_virtual_environment_vm.ceph": "its disk scsi0 is on storage ceph-pool, not Mamela's disk storage local-lvm",
+    "proxmox_virtual_environment_vm.ours": "it carries a marker of Mamela's",
+    "proxmox_virtual_environment_vm.prod_db": "VMID 100 is outside Mamela's VMIDs 7000..7009",
+    "proxmox_virtual_environment_vm.virtio": "it has no disk scsi0 (its disks: virtio0)",
+    "proxmox_virtual_environment_vm.vlan": "its network net0 is on bridge vmbr1, not Mamela's bridge vmbr0",
+    "proxmox_virtual_environment_vm.wide": "it has 2 sockets",
+    "proxmox_virtual_environment_download_file.noble": "no kind of provider proxmox imports"
+  }
+}
