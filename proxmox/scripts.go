@@ -16,7 +16,7 @@ import (
 var Scripts = []protocol.Script{
 	{Name: "bootstrap", Description: "run as root on a Proxmox node: create the pool, the roles, the operating and audit users and tokens, and exactly the grants (removing grants no longer needed)"},
 	{Name: "permissions", Description: "explain every privilege of the operating token and the operations that need it (text, not a script)"},
-	{Name: "cleanup", Description: "run as root on a Proxmox node: list the uploads (mamela-*) no VM uses; remove them only with --free"},
+	{Name: "cleanup", Description: "run as root on a Proxmox node: list the uploads (mamela-*) no VM uses; remove the seeds with --free, and the images too with --free --images"},
 }
 
 // ScriptConfig is what the scripts need: the guard's settings and the tokens.
@@ -191,20 +191,25 @@ for a in json.load(sys.stdin):
 
 // Cleanup is a script that finds the files the provider uploaded to the image storage (images and
 // seeds, named mamela-...) that no VM of the cluster uses, lists them, and removes them only when
-// run with --free. The provider's token cannot remove files: that would need Datastore.Allocate on
-// the whole storage, which also holds other guests' backups and templates.
+// run with --free: the seeds (each made for one VM, and of no use once it is made or gone), and the
+// images only with --images too (an image is what the next template is made from: removing it
+// means uploading it again). The provider's token cannot remove files: that would need
+// Datastore.Allocate on the whole storage, which also holds other guests' backups and templates.
 func Cleanup(c ScriptConfig) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 	w("#!/usr/bin/env bash")
 	w("# Mamela Proxmox cleanup — written by the proxmox provider (mamela provider script <pome-dir> proxmox cleanup). Review it before running it as root.")
 	w("# It lists the files on storage %s whose names start with mamela- and that no VM of the cluster", c.Guard.ImageStorage)
-	w("# refers to. It removes them only when run with --free.")
+	w("# refers to. It removes the seeds only when run with --free, and the images (what the next")
+	w("# template is made from) only with --free --images.")
 	w("set -euo pipefail")
 	w("unused=\"$(python3 -c '%s' %s %s)\"", unusedVolumes, c.Guard.Node, c.Guard.ImageStorage)
 	w("if [ -z \"$unused\" ]; then echo 'nothing to remove'; exit 0; fi")
 	w("echo \"unused uploads:\"; echo \"$unused\"")
-	w("if [ \"${1:-}\" != --free ]; then echo 'run again with --free to remove them'; exit 0; fi")
+	w("if [ \"${1:-}\" != --free ]; then echo 'run again with --free to remove the seeds (--free --images: the images too)'; exit 0; fi")
+	w("if [ \"${2:-}\" != --images ]; then unused=\"$(echo \"$unused\" | grep -v ':import/' || true)\"; echo 'images kept (--images removes them too)'; fi")
+	w("if [ -z \"$unused\" ]; then echo 'nothing to remove'; exit 0; fi")
 	w("echo \"$unused\" | while read -r vol; do pvesm free \"$vol\"; done")
 	return b.String()
 }

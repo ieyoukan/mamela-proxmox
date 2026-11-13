@@ -200,7 +200,7 @@ mamela provider script <pome-dir> proxmox cleanup   > cleanup.sh
 - **プロバイダーに渡るもの:** `mamela.providers.toml` の `[provider.proxmox.guard]` と、Token の ID と秘密のファイルの場所だけです。秘密そのものは渡りません。
 - **Proxmox への要求:** スクリプトを書く間、プロバイダーは Proxmox に何も送れません（host が拒みます）。
 - **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
-- **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ消します。
+- **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ seed を消します。イメージは次のテンプレートの元なので、`--free --images` のときだけ消します（消すと、次にテンプレートを作るときにもう一度アップロードします）。
 
 ## 例
 

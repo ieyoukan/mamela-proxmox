@@ -181,7 +181,7 @@ mamela plan <pome-dir>                                                     # 宣
 mamela provider script <pome-dir> proxmox cleanup > cleanup.sh
 less cleanup.sh
 bash cleanup.sh            # 使われていない mamela-* の一覧を出すだけ
-bash cleanup.sh --free     # 確かめてから消す
+bash cleanup.sh --free     # 確かめてから seed を消す（--free --images でイメージも）
 ~~~
 
 ## 11. 運用ルール

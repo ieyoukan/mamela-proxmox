@@ -44,7 +44,8 @@ func TestBootstrap(t *testing.T) {
 			t.Errorf("grants the operating token too much: %s", l)
 		}
 	}
-	if !strings.Contains(script(t, "permissions"), "VM.Allocate") || !strings.Contains(script(t, "cleanup"), "--free") {
+	if !strings.Contains(script(t, "permissions"), "VM.Allocate") || !strings.Contains(script(t, "cleanup"), "--free") ||
+		!strings.Contains(script(t, "cleanup"), "grep -v ':import/'") {
 		t.Error("permissions or cleanup is incomplete")
 	}
 }
