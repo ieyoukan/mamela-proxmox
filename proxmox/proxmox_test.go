@@ -50,7 +50,7 @@ func newFake() *fakepve.Server {
 	}
 	f := fakepve.New()
 	f.Permissions = map[string]map[string]int{}
-	for _, g := range proxmox.Grants(proxmox.Provider{}.Manifest(), s) {
+	for _, g := range proxmox.Grants(proxmox.New().Manifest(), s) {
 		f.Permissions[g.Path] = map[string]int{}
 		for _, p := range g.Privs {
 			f.Permissions[g.Path][p] = 1
@@ -80,7 +80,12 @@ func TestConformance(t *testing.T) {
 			{Name: "one-vm", Desired: []protocol.Resource{
 				vm("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
 				Explicit: []providertest.Explicit{{Op: proxmox.OpReboot, Resource: "ProxmoxVM web"}, {Op: proxmox.OpReset, Resource: "ProxmoxVM web"},
-					{Op: proxmox.OpDelete, Resource: "ProxmoxVM web"}}},
+					{Op: proxmox.OpStop, Resource: "ProxmoxVM web"}, {Op: proxmox.OpDelete, Resource: "ProxmoxVM web"}}},
+			// A VM declared stopped is made and never started; a running one is stopped by hand.
+			{Name: "stopped", Desired: []protocol.Resource{template("ubuntu-24.04-pve1"),
+				clone("batch", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"},"stopped":true`),
+				clone("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpStop, Resource: "ProxmoxVM web"}}},
 			// A VM of the old built-in provider, taken over, then managed as any other; a container
 			// of someone else's, outside the boundary, is left alone.
 			{Name: "adopt", Desired: []protocol.Resource{
@@ -124,13 +129,38 @@ func TestPomeProgramIsTheBuild(t *testing.T) {
 	if !strings.Contains(string(toml), `sha256 = "`+hex.EncodeToString(sum[:])+`"`) {
 		t.Error("pome/mamela-provider.toml does not name the program: run ./build.sh")
 	}
+	// The typed declarations (src/kinds.emel) are what the manifest generates.
+	check := exec.Command("go", "tool", "mamela", "provider", "pome", "--check", "--out", "src/kinds.emel", "../pome")
+	check.Env = append(os.Environ(), "GOWORK=off")
+	if b, err := check.CombinedOutput(); err != nil {
+		t.Errorf("%v\n%s", err, b)
+	}
+}
+
+// The Pome (its hand-written Proxmox and its generated Proxmox.Kinds) and the examples compile.
+func TestPomeChecks(t *testing.T) {
+	dir := os.Getenv("MAMELA_TOOLCHAIN_DIR")
+	if dir == "" {
+		t.Skip("MAMELA_TOOLCHAIN_DIR: the toolchain of Mamela")
+	}
+	for _, pome := range []string{"../pome", "../examples/homelab", "../examples/k3s"} {
+		cmd := exec.Command(filepath.Join(dir, "emela"), "check")
+		cmd.Dir = pome
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%s: emela check: %v\n%s", pome, err, b)
+		}
+	}
 }
 
 // The catalog the Pome ships is exactly what the catalogs package writes (build.sh), and
 // mamela-provider.toml lists it.
 func TestShippedCatalogIsTheSource(t *testing.T) {
 	toml, _ := os.ReadFile("../pome/mamela-provider.toml")
-	for name, c := range catalogs.All {
+	all, err := catalogs.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range all {
 		want, err := catalogs.Encode(c)
 		if err != nil {
 			t.Fatal(err)

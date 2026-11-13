@@ -1,17 +1,17 @@
 package proxmox
 
 import (
-	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/ieyoukan/mamela/provider/kit"
 	"github.com/ieyoukan/mamela/provider/protocol"
-	"github.com/ieyoukan/mamela/provider/sdk"
 )
 
 // The guard (ADR 0006 of Mamela) is the provider's safety check around every apply on a shared
@@ -85,8 +85,9 @@ type Guest struct {
 	Uptime       int64  `json:"uptime,omitempty"`
 	ConfigDigest string `json:"configDigest,omitempty"` // empty when its node is offline
 	// What a VM's configuration gives it, to count what a start or a resize adds (0 when unknown).
-	MemoryMiB int64 `json:"memoryMiB,omitempty"`
-	DiskGiB   int64 `json:"diskGiB,omitempty"`
+	MemoryMiB int64  `json:"memoryMiB,omitempty"`
+	DiskGiB   int64  `json:"diskGiB,omitempty"`
+	Network   string `json:"network,omitempty"` // network recorded in the provider ownership marker
 }
 
 // Facts are what the guard decides from. Gathering is apart from checking, so that the checks are
@@ -117,7 +118,7 @@ var (
 var GuardCalls = []protocol.Call{clusterStatus, listVMs, getConfig, lxcConfig, nodeStatus, storageStatus, storages, permissions}
 
 // Gather reads the facts through the host (the audit token).
-func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
+func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
 	f := &Facts{}
 	var status []struct {
 		Type    string `json:"type"`
@@ -126,7 +127,7 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 		Nodes   int    `json:"nodes"`
 		Online  int    `json:"online"`
 	}
-	if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/cluster/status"}, &status); err != nil {
+	if err := get(c, clusterStatus, nil, nil, &status); err != nil {
 		return nil, err
 	}
 	online := map[string]bool{}
@@ -156,7 +157,7 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 		Uptime   int64  `json:"uptime"`
 		Template int    `json:"template"`
 	}
-	if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/cluster/resources", Query: map[string][]string{"type": {"vm"}}}, &rs); err != nil {
+	if err := get(c, listVMs, nil, map[string][]string{"type": {"vm"}}, &rs); err != nil {
 		return nil, err
 	}
 	for _, r := range rs {
@@ -165,13 +166,22 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 		}
 		g := Guest{VMID: r.VMID, Type: r.Type, Node: r.Node, Name: r.Name, Status: r.Status, Pool: r.Pool, Uptime: r.Uptime}
 		if online[g.Node] {
+			read := getConfig
+			if g.Type == "lxc" {
+				read = lxcConfig
+			}
 			var cfg vmConfig
-			if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: fmt.Sprintf("/nodes/%s/%s/%d/config", g.Node, g.Type, g.VMID)}, &cfg); err != nil {
+			if err := get(c, read, ids(g.Node, g.VMID), nil, &cfg); err != nil {
 				return nil, err
 			}
 			g.ConfigDigest = cfg.Digest
 			if g.Type == "qemu" {
 				g.MemoryMiB, g.DiskGiB = cfg.Memory, cfg.DiskGiB
+				if m, ok := markerOf(Kind, cfg.Description); ok {
+					g.Network = m.Network
+				} else if m, ok := parseOldMarker(cfg.Description); ok {
+					g.Network = m.Network
+				}
 			}
 		}
 		f.Guests = append(f.Guests, g)
@@ -185,7 +195,7 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 				Available int64 `json:"available"`
 			} `json:"memory"`
 		}
-		if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/nodes/" + s.Node + "/status"}, &ns); err != nil {
+		if err := get(c, nodeStatus, map[string]string{"node": s.Node}, nil, &ns); err != nil {
 			return nil, err
 		}
 		f.MemAvailable = ns.Memory.Available
@@ -196,21 +206,21 @@ func Gather(ctx context.Context, h *sdk.Host, s GuardSettings) (*Facts, error) {
 			Total int64 `json:"total"`
 			Used  int64 `json:"used"`
 		}
-		if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: fmt.Sprintf("/nodes/%s/storage/%s/status", s.Node, s.DiskStorage)}, &ss); err != nil {
+		if err := get(c, storageStatus, map[string]string{"node": s.Node, "storage": s.DiskStorage}, nil, &ss); err != nil {
 			return nil, err
 		}
 		f.DiskTotal, f.DiskUsed = ss.Total, ss.Used
 		var st []struct {
 			Storage string `json:"storage"`
 		}
-		if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/nodes/" + s.Node + "/storage", Query: map[string][]string{"content": {"import"}}}, &st); err != nil {
+		if err := get(c, storages, map[string]string{"node": s.Node}, map[string][]string{"content": {"import"}}, &st); err != nil {
 			return nil, err
 		}
 		for _, x := range st {
 			f.ImportStorages = append(f.ImportStorages, x.Storage)
 		}
 	}
-	if err := call(ctx, h, protocol.HostRequest{Method: "GET", Path: "/access/permissions", Query: map[string][]string{"userid": {s.OperatingToken}}}, &f.Permissions); err != nil {
+	if err := get(c, permissions, nil, map[string][]string{"userid": {s.OperatingToken}}, &f.Permissions); err != nil {
 		return nil, fmt.Errorf("the operating token's permissions: %w", err)
 	}
 	return f, nil
@@ -396,6 +406,7 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	if outside == 0 {
 		add("PVE-0304", ok, "every change stays on node %s, in pool %s and VMIDs %d..%d", s.Node, s.Pool, s.VMIDMin, s.VMIDMax)
 	}
+	out = append(out, checkStaticAddresses(s, f.Guests, changes)...)
 	return out
 }
 
@@ -523,20 +534,20 @@ func Compare(s GuardSettings, before Baseline, f *Facts) []protocol.Finding {
 	return out
 }
 
-// Guard implements sdk.Guarder.
-func (p Provider) Guard(ctx context.Context, h *sdk.Host, in protocol.GuardParams) (protocol.GuardResult, error) {
+// guard is the provider's guard (kit.Provider.GuardFunc), with the provider's manifest.
+func guard(c *kit.Client, m protocol.Manifest, in protocol.GuardParams) (protocol.GuardResult, error) {
 	s, err := ParseGuardSettings(in.Settings)
 	if err != nil {
 		return protocol.GuardResult{}, err
 	}
-	f, err := Gather(ctx, h, s)
+	f, err := Gather(c, s)
 	if err != nil {
 		return protocol.GuardResult{}, err
 	}
 	switch in.Stage {
 	case protocol.GuardBefore:
 		b, _ := json.Marshal(NewBaseline(s, f), json.Deterministic(true))
-		return protocol.GuardResult{Findings: Check(s, p.Manifest(), f, in.Changes), Baseline: b}, nil
+		return protocol.GuardResult{Findings: Check(s, m, f, in.Changes), Baseline: b}, nil
 	case protocol.GuardAfter:
 		var b Baseline
 		if err := json.Unmarshal(in.Baseline, &b, json.RejectUnknownMembers(true)); err != nil || b.Schema != BaselineSchema {
@@ -644,6 +655,42 @@ func Missing(grants []Grant, perms map[string]map[string]int) []string {
 		for _, priv := range g.Privs {
 			if perms[g.Path][priv] == 0 {
 				out = append(out, fmt.Sprintf("%s %s (for %s)", g.Path, priv, strings.Join(g.Reasons[priv], ", ")))
+			}
+		}
+	}
+	return out
+}
+
+// checkStaticAddresses compares the static addresses recorded for managed guests and every seed
+// in the proposed changes. It does not claim to discover DHCP leases or unmanaged guest addresses.
+func checkStaticAddresses(s GuardSettings, guests []Guest, changes []protocol.Change) []protocol.Finding {
+	assigned := map[netip.Addr]int64{}
+	for _, g := range guests {
+		fields := strings.Fields(g.Network)
+		if !s.IsLab(g) || len(fields) < 2 || fields[0] != "static" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(fields[1]); err == nil {
+			assigned[p.Addr().Unmap()] = g.VMID
+		}
+	}
+	var out []protocol.Finding
+	for _, c := range changes {
+		for _, a := range c.Artifacts {
+			if a.Kind != protocol.ArtifactSeed || a.Network == nil || a.Network.Mode != "static" {
+				continue
+			}
+			prefix, err := netip.ParsePrefix(a.Network.Address)
+			id, idErr := strconv.ParseInt(c.IDs["vmid"], 10, 64)
+			if err != nil || idErr != nil {
+				out = append(out, finding("PVE-0306", protocol.SeverityBlock, "%s has an invalid static address or VMID", c.Resource))
+				continue
+			}
+			addr := prefix.Addr().Unmap()
+			if owner, used := assigned[addr]; used && owner != id {
+				out = append(out, finding("PVE-0306", protocol.SeverityBlock, "%s requests static address %s already assigned to VM %d; choose another address", c.Resource, addr, owner))
+			} else {
+				assigned[addr] = id
 			}
 		}
 	}

@@ -17,7 +17,7 @@ var goodCredentials = protocol.ScriptCredentials{TokenID: "mamela@pve!lab", Toke
 
 func script(t *testing.T, name string) string {
 	t.Helper()
-	res, err := Provider{}.Script(context.Background(), protocol.ScriptParams{Name: name, Settings: []byte(goodSettings), Credentials: goodCredentials})
+	res, err := New().Script(context.Background(), protocol.ScriptParams{Name: name, Settings: []byte(goodSettings), Credentials: goodCredentials})
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -65,7 +65,7 @@ func TestScriptRejects(t *testing.T) {
 	} {
 		p := protocol.ScriptParams{Name: "bootstrap", Settings: []byte(goodSettings), Credentials: goodCredentials}
 		edit(&p)
-		if _, err := (Provider{}).Script(context.Background(), p); err == nil {
+		if _, err := New().Script(context.Background(), p); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

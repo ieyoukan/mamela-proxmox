@@ -1,7 +1,6 @@
 package proxmox
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -50,17 +49,17 @@ func NewScriptConfig(p protocol.ScriptParams) (ScriptConfig, error) {
 	return c, nil
 }
 
-// Script implements sdk.Scripter.
-func (Provider) Script(_ context.Context, p protocol.ScriptParams) (protocol.ScriptResult, error) {
+// writeScript writes a script (kit.Provider.ScriptFunc), with the provider's manifest.
+func writeScript(m protocol.Manifest, p protocol.ScriptParams) (protocol.ScriptResult, error) {
 	c, err := NewScriptConfig(p)
 	if err != nil {
 		return protocol.ScriptResult{}, err
 	}
 	switch p.Name {
 	case "bootstrap":
-		return protocol.ScriptResult{Text: Bootstrap(c)}, nil
+		return protocol.ScriptResult{Text: Bootstrap(m, c)}, nil
 	case "permissions":
-		return protocol.ScriptResult{Text: Permissions(c)}, nil
+		return protocol.ScriptResult{Text: Permissions(m, c)}, nil
 	case "cleanup":
 		return protocol.ScriptResult{Text: Cleanup(c)}, nil
 	}
@@ -96,10 +95,10 @@ func role(g GuardSettings, path string) string {
 
 // Permissions explains every grant: the path, the role, each privilege and the operations that
 // need it.
-func Permissions(c ScriptConfig) string {
+func Permissions(m protocol.Manifest, c ScriptConfig) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "The operating token %s gets exactly these privileges (from the provider's manifest):\n", c.TokenID)
-	for _, g := range Grants(Provider{}.Manifest(), c.Guard) {
+	for _, g := range Grants(m, c.Guard) {
 		fmt.Fprintf(&b, "\n%s (role %s)\n", g.Path, role(c.Guard, g.Path))
 		for _, p := range g.Privs {
 			fmt.Fprintf(&b, "  %-26s %s\n", p, strings.Join(g.Reasons[p], ", "))
@@ -113,9 +112,9 @@ func Permissions(c ScriptConfig) string {
 // Bootstrap is the setup script: the pool, the import content type on the image storage, one role
 // per path, the operating user and token with exactly the grants, the removal of their grants that
 // are no longer needed, and the audit user and token. Running it again converges.
-func Bootstrap(c ScriptConfig) string {
+func Bootstrap(m protocol.Manifest, c ScriptConfig) string {
 	g := c.Guard
-	grants := Grants(Provider{}.Manifest(), g)
+	grants := Grants(m, g)
 	opUser, auditUser := user(c.TokenID), user(c.GuardTokenID)
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }

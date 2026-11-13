@@ -10,7 +10,7 @@ import (
 // Every call of every operation (and of observing) is in the permission catalog, and the
 // operation's needs cover what the catalog says it needs: the grants are never short of a call.
 func TestNeedsCoverTheCatalog(t *testing.T) {
-	m := Provider{}.Manifest()
+	m := New().Manifest()
 	covers := func(needs []protocol.Need, p Privilege) bool {
 		return slices.ContainsFunc(needs, func(n protocol.Need) bool {
 			return n.Target.Type == "proxmox-acl" && n.Target.Ref == p.Ref && slices.Contains(p.Privs, n.Capability)
@@ -44,7 +44,7 @@ func TestNeedsCoverTheCatalog(t *testing.T) {
 // And no more: every privilege an operation declares is one a call of it needs (the narrowest of
 // Proxmox's alternatives), so the bootstrap grants nothing the provider never uses.
 func TestNeedsAreNoMoreThanTheCatalog(t *testing.T) {
-	m := Provider{}.Manifest()
+	m := New().Manifest()
 	used := func(calls []protocol.Call, n protocol.Need) bool {
 		for _, c := range calls {
 			ps, _ := PrivilegesOf(c)

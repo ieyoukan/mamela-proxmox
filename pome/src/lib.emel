@@ -10,6 +10,9 @@
 ## same way for every VM of the image on the node, which Mamela takes as one resource). Mamela makes
 ## the template once, from the pinned image, and each VM from it in seconds; the template is deleted
 ## only by the explicit `delete-template`, once no VM is cloned from it.
+##
+## The typed declarations of every kind, generated from the provider's manifest, are in
+## `Proxmox.Kinds` (src/kinds.emel): `mamela import terraform` writes the VMs it imports with them.
 
 import Mamela
 import Mamela.{Network, Ref}
@@ -63,8 +66,24 @@ pub fn template_name(site: Site, image: String) -> String {
   "#{image}-#{site.node}"
 }
 
-## Declares the VM on the site, and the template of its image it is cloned from.
+## Declares the VM on the site, and the template of its image it is cloned from. Mamela starts it
+## once it is made, and again whenever it finds it stopped.
 pub fn vm(graph: Mamela.Graph, site: Site, vm: Vm) -> Mamela.Graph {
+  declare(graph, site, vm, [])
+}
+
+## Declares the VM like `vm`, kept stopped: Mamela makes it without starting it, and shuts it down
+## (asks its guest to power off) when it finds it running.
+pub fn vm_stopped(graph: Mamela.Graph, site: Site, vm: Vm) -> Mamela.Graph {
+  declare(graph, site, vm, [("stopped", Dynamic.Bool(True))])
+}
+
+fn declare(
+  graph: Mamela.Graph,
+  site: Site,
+  vm: Vm,
+  extra: List[(String, Dynamic)],
+) -> Mamela.Graph {
   template = template_name(site, vm.image)
   with_template = Mamela.provided(
     graph,
@@ -94,7 +113,7 @@ pub fn vm(graph: Mamela.Graph, site: Site, vm: Vm) -> Mamela.Graph {
     PROVIDER,
     KIND,
     vm.name,
-    spec,
+    List.append(spec, extra),
     [Ref(kind: TEMPLATE_KIND, name: template)],
   )
 }

@@ -17,7 +17,7 @@ var settings = GuardSettings{Node: "pve1", Pool: "lab", VMIDMin: 7000, VMIDMax: 
 func healthy() *Facts {
 	f := &Facts{Quorate: true, NodesTotal: 3, NodesOnline: 3, NodeOnline: true, MemAvailable: 32 << 30,
 		DiskTotal: 1000 << 30, DiskUsed: 100 << 30, ImportStorages: []string{"local"}, Permissions: map[string]map[string]int{}}
-	for _, g := range Grants(Provider{}.Manifest(), settings) {
+	for _, g := range Grants(New().Manifest(), settings) {
 		f.Permissions[g.Path] = map[string]int{}
 		for _, p := range g.Privs {
 			f.Permissions[g.Path][p] = 1
@@ -52,7 +52,7 @@ func createChange(vmid, pool, memory, disk string) protocol.Change {
 }
 
 func TestCheckHealthy(t *testing.T) {
-	fs := Check(settings, Provider{}.Manifest(), healthy(), []protocol.Change{createChange("7001", "lab", "2048", "20")})
+	fs := Check(settings, New().Manifest(), healthy(), []protocol.Change{createChange("7001", "lab", "2048", "20")})
 	if b := codes(fs, protocol.SeverityBlock); len(b) > 0 {
 		t.Fatalf("blocks %v: %+v", b, fs)
 	}
@@ -60,7 +60,7 @@ func TestCheckHealthy(t *testing.T) {
 
 // Every unsafe state blocks, with its own code.
 func TestCheckBlocks(t *testing.T) {
-	m := Provider{}.Manifest()
+	m := New().Manifest()
 	ok := []protocol.Change{createChange("7001", "lab", "2048", "20")}
 	for _, c := range []struct {
 		name    string
@@ -162,7 +162,7 @@ func observed(t *testing.T, st State, adoptable bool) protocol.Observed {
 }
 
 func TestPrepare(t *testing.T) {
-	p := Provider{}
+	p := New()
 	ctx := context.Background()
 	got, err := p.Prepare(ctx, protocol.PrepareParams{Op: OpDelete, Observed: observed(t, State{Running: true}, false)})
 	if err != nil || len(got.Change.Requests) != 2 || got.Change.Requests[0].Path != stopVM.Path || got.Change.Requests[1].Method != "DELETE" {
@@ -207,7 +207,7 @@ func TestStartingAStoppedVMCountsItsMemory(t *testing.T) {
 	f := healthy()
 	f.MemAvailable = 5 << 30
 	f.Guests = append(f.Guests, Guest{VMID: 7001, Type: "qemu", Node: "pve1", Name: "big", Pool: "lab", Status: "stopped", MemoryMiB: 8192, DiskGiB: 20})
-	fs := Check(settings, Provider{}.Manifest(), f, []protocol.Change{startChange("7001")})
+	fs := Check(settings, New().Manifest(), f, []protocol.Change{startChange("7001")})
 	if !slices.Contains(codes(fs, protocol.SeverityBlock), "PVE-0201") {
 		t.Fatalf("an 8 GiB start with 5 GiB available: %+v", fs)
 	}
@@ -249,6 +249,32 @@ func TestNeedCountsEachVMOnce(t *testing.T) {
 		n := NeedOf(c.changes, guests)
 		if n.MemoryMiB != c.memory || n.DiskGiB != c.disk || n.Creates != c.creates {
 			t.Errorf("%s: %+v, want %d MiB, %d GiB, %d creates", c.name, n, c.memory, c.disk, c.creates)
+		}
+	}
+}
+
+func TestStaticAddressCollisionBlocks(t *testing.T) {
+	makeChange := func(id, address string) protocol.Change {
+		c := createChange(id, "lab", "1024", "10")
+		c.Artifacts = []protocol.Artifact{{ID: "seed", Kind: protocol.ArtifactSeed, Node: "web", Network: &protocol.Network{Mode: "static", Address: address}}}
+		return c
+	}
+	f := healthy()
+	f.Guests[2].Network = "static 192.0.2.40/24 via 192.0.2.1 dns 192.0.2.1"
+	for name, changes := range map[string][]protocol.Change{
+		"existing guest": {makeChange("7001", "192.0.2.40/25")},
+		"same plan":      {makeChange("7001", "192.0.2.41/24"), makeChange("7002", "192.0.2.41/25")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Check(settings, New().Manifest(), f, changes)
+			if !slices.Contains(codes(got, protocol.SeverityBlock), "PVE-0306") {
+				t.Fatalf("collision allowed: %+v", got)
+			}
+		})
+	}
+	for _, c := range []protocol.Change{makeChange("7000", "192.0.2.40/24"), makeChange("7001", "192.0.2.42/24")} {
+		if got := checkStaticAddresses(settings, f.Guests, []protocol.Change{c}); len(got) != 0 {
+			t.Fatalf("retry or unused address blocked: %+v", got)
 		}
 	}
 }

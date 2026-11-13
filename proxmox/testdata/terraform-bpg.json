@@ -1,0 +1,371 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.8",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "proxmox_virtual_environment_download_file.noble",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_download_file",
+          "name": "noble",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "checksum": null,
+            "content_type": "iso",
+            "datastore_id": "local",
+            "file_name": "noble-server-cloudimg-amd64.img",
+            "id": "local:iso/noble-server-cloudimg-amd64.img",
+            "node_name": "pve1",
+            "overwrite": true,
+            "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.app",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "app",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 2, "sockets": 1, "type": "x86-64-v2-AES" }],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 32 }],
+            "id": "7003",
+            "memory": [{ "dedicated": 4096, "floating": 0 }],
+            "name": "app",
+            "network_device": [{ "bridge": "vmbr0", "model": "virtio" }],
+            "node_name": "pve1",
+            "pool_id": "prod",
+            "started": true,
+            "tags": ["prod"],
+            "template": false,
+            "vm_id": 7003
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.ceph",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "ceph",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "disk": [{ "datastore_id": "ceph-pool", "interface": "scsi0", "size": 10 }],
+            "id": "7006",
+            "memory": [{ "dedicated": 1024 }],
+            "name": "ceph",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "started": true,
+            "template": false,
+            "vm_id": 7006
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.minimal",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "minimal",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 8 }],
+            "id": "7008",
+            "memory": [],
+            "name": "minimal",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "vm_id": 7008
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.ours",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "ours",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "description": "Managed by Mamela (proxmox provider). Do not edit the lines below.\nmamela-name: k3s-server\nmamela-image: ubuntu-24.04\nmamela-network: dhcp\n",
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 20 }],
+            "id": "7000",
+            "memory": [{ "dedicated": 2048 }],
+            "name": "k3s-server",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "started": true,
+            "tags": ["mamela-lab"],
+            "template": false,
+            "vm_id": 7000
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.prod_db",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "prod_db",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 8, "sockets": 1 }],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 200 }],
+            "id": "100",
+            "memory": [{ "dedicated": 32768 }],
+            "name": "prod-db",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "",
+            "started": true,
+            "template": false,
+            "vm_id": 100
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.virtio",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "virtio",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "virtio0", "size": 10 }],
+            "id": "7005",
+            "memory": [{ "dedicated": 1024 }],
+            "name": "virtio",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "started": true,
+            "template": false,
+            "vm_id": 7005
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.vlan",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "vlan",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 10 }],
+            "id": "7007",
+            "memory": [{ "dedicated": 1024 }],
+            "name": "vlan",
+            "network_device": [{ "bridge": "vmbr1", "vlan_id": 30 }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "started": true,
+            "template": false,
+            "vm_id": 7007
+          }
+        },
+        {
+          "address": "proxmox_virtual_environment_vm.wide",
+          "mode": "managed",
+          "type": "proxmox_virtual_environment_vm",
+          "name": "wide",
+          "provider_name": "registry.terraform.io/bpg/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 2, "sockets": 2, "type": "host" }],
+            "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 10 }],
+            "id": "7004",
+            "memory": [{ "dedicated": 2048 }],
+            "name": "wide",
+            "network_device": [{ "bridge": "vmbr0" }],
+            "node_name": "pve1",
+            "pool_id": "lab",
+            "started": true,
+            "template": false,
+            "vm_id": 7004
+          }
+        }
+      ],
+      "child_modules": [
+        {
+          "address": "module.k8s",
+          "resources": [
+            {
+              "address": "module.k8s.proxmox_virtual_environment_vm.node[0]",
+              "mode": "managed",
+              "type": "proxmox_virtual_environment_vm",
+              "name": "node",
+              "index": 0,
+              "provider_name": "registry.terraform.io/bpg/proxmox",
+              "schema_version": 0,
+              "values": {
+                "acpi": true,
+                "agent": [{ "enabled": true, "timeout": "15m", "trim": false, "type": "virtio" }],
+                "audio_device": [],
+                "bios": "seabios",
+                "boot_order": ["scsi0", "net0"],
+                "cdrom": [],
+                "clone": [{ "datastore_id": "", "full": true, "node_name": "", "retries": 1, "vm_id": 9000 }],
+                "cpu": [
+                  {
+                    "affinity": "",
+                    "architecture": "",
+                    "cores": 4,
+                    "flags": [],
+                    "hotplugged": 0,
+                    "limit": 0,
+                    "numa": false,
+                    "sockets": 1,
+                    "type": "x86-64-v2-AES",
+                    "units": 1024
+                  }
+                ],
+                "description": "k8s node 0 (Terraform)",
+                "disk": [
+                  {
+                    "aio": "io_uring",
+                    "backup": true,
+                    "cache": "none",
+                    "datastore_id": "local-lvm",
+                    "discard": "on",
+                    "file_format": "raw",
+                    "file_id": "",
+                    "interface": "scsi0",
+                    "iothread": true,
+                    "path_in_datastore": "vm-7001-disk-0",
+                    "replicate": true,
+                    "serial": "",
+                    "size": 40,
+                    "speed": [],
+                    "ssd": true
+                  },
+                  {
+                    "aio": "io_uring",
+                    "backup": false,
+                    "cache": "none",
+                    "datastore_id": "local-lvm",
+                    "discard": "on",
+                    "file_format": "raw",
+                    "file_id": "",
+                    "interface": "scsi1",
+                    "iothread": true,
+                    "path_in_datastore": "vm-7001-disk-1",
+                    "replicate": true,
+                    "serial": "",
+                    "size": 100,
+                    "speed": [],
+                    "ssd": true
+                  }
+                ],
+                "efi_disk": [],
+                "hook_script_file_id": null,
+                "hostpci": [],
+                "id": "7001",
+                "initialization": [
+                  {
+                    "datastore_id": "local-lvm",
+                    "dns": [{ "domain": "example.internal", "servers": ["192.0.2.1", "192.0.2.2"] }],
+                    "interface": "ide2",
+                    "ip_config": [{ "ipv4": [{ "address": "192.0.2.31/24", "gateway": "192.0.2.1" }], "ipv6": [] }],
+                    "meta_data_file_id": "",
+                    "network_data_file_id": "",
+                    "type": "",
+                    "upgrade": true,
+                    "user_account": [{ "keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@example"], "password": "", "username": "ubuntu" }],
+                    "user_data_file_id": "",
+                    "vendor_data_file_id": ""
+                  }
+                ],
+                "ipv4_addresses": [["127.0.0.1"], ["192.0.2.31"]],
+                "ipv6_addresses": [["::1"], ["fe80::be24:11ff:fe00:701"]],
+                "keyboard_layout": "en-us",
+                "kvm_arguments": "",
+                "mac_addresses": ["00:00:00:00:00:00", "BC:24:11:00:07:01"],
+                "machine": "",
+                "memory": [{ "dedicated": 8192, "floating": 4096, "hugepages": "", "keep_hugepages": false, "shared": 0 }],
+                "migrate": false,
+                "name": "k8s-node-0",
+                "network_device": [
+                  {
+                    "bandwidth": 0,
+                    "bridge": "vmbr0",
+                    "disconnected": false,
+                    "enabled": true,
+                    "firewall": false,
+                    "mac_address": "BC:24:11:00:07:01",
+                    "model": "virtio",
+                    "mtu": 0,
+                    "queues": 0,
+                    "rate_limit": 0,
+                    "trunks": "",
+                    "vlan_id": 0
+                  }
+                ],
+                "network_interface_names": ["lo", "eth0"],
+                "node_name": "pve1",
+                "numa": [],
+                "on_boot": true,
+                "operating_system": [{ "type": "l26" }],
+                "pool_id": "lab",
+                "protection": false,
+                "reboot": false,
+                "reboot_after_update": true,
+                "rng": [],
+                "scsi_hardware": "virtio-scsi-single",
+                "serial_device": [{ "device": "socket" }],
+                "smbios": [],
+                "started": true,
+                "startup": [],
+                "stop_on_destroy": false,
+                "tablet_device": true,
+                "tags": ["k8s", "terraform"],
+                "template": false,
+                "timeout_clone": 1800,
+                "timeout_create": 1800,
+                "timeout_migrate": 1800,
+                "timeout_reboot": 1800,
+                "timeout_shutdown_vm": 1800,
+                "timeout_start_vm": 1800,
+                "timeout_stop_vm": 300,
+                "tpm_state": [],
+                "usb": [],
+                "vga": [],
+                "virtiofs": [],
+                "vm_id": 7001,
+                "watchdog": []
+              }
+            },
+            {
+              "address": "module.k8s.proxmox_virtual_environment_vm.node[1]",
+              "mode": "managed",
+              "type": "proxmox_virtual_environment_vm",
+              "name": "node",
+              "index": 1,
+              "provider_name": "registry.terraform.io/bpg/proxmox",
+              "schema_version": 0,
+              "values": {
+                "cpu": [{ "cores": 4, "sockets": 1 }],
+                "disk": [{ "datastore_id": "local-lvm", "interface": "scsi0", "size": 40 }],
+                "id": "7002",
+                "memory": [{ "dedicated": 8192 }],
+                "name": "k8s-node-1",
+                "network_device": [{ "bridge": "vmbr0" }],
+                "node_name": "pve2",
+                "pool_id": "lab",
+                "started": true,
+                "template": false,
+                "vm_id": 7002
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

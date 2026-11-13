@@ -4,44 +4,19 @@
   "entries": [
     {
       "method": "GET",
+      "path": "/access/permissions",
+      "effect": "read",
+      "query": [
+        "path",
+        "userid"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/cluster/resources",
       "effect": "read",
       "query": [
         "type"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/qemu/{vmid}/config",
-      "effect": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/qemu/{vmid}/status/current",
-      "effect": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/tasks/{upid}/status",
-      "effect": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/tasks",
-      "effect": "read",
-      "query": [
-        "vmid",
-        "typefilter",
-        "source",
-        "limit"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/storage/{storage}/content",
-      "effect": "read",
-      "query": [
-        "content"
       ]
     },
     {
@@ -51,68 +26,30 @@
     },
     {
       "method": "GET",
-      "path": "/nodes/{node}/status",
-      "effect": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/storage/{storage}/status",
-      "effect": "read"
-    },
-    {
-      "method": "GET",
-      "path": "/nodes/{node}/storage",
-      "effect": "read",
-      "query": [
-        "content"
-      ]
-    },
-    {
-      "method": "GET",
-      "path": "/access/permissions",
-      "effect": "read",
-      "query": [
-        "userid",
-        "path"
-      ]
-    },
-    {
-      "method": "GET",
       "path": "/nodes/{node}/lxc/{vmid}/config",
       "effect": "read"
-    },
-    {
-      "method": "POST",
-      "path": "/nodes/{node}/storage/{storage}/upload",
-      "effect": "create",
-      "form": [
-        "content",
-        "checksum-algorithm",
-        "checksum"
-      ],
-      "file": "filename"
     },
     {
       "method": "POST",
       "path": "/nodes/{node}/qemu",
       "effect": "create",
       "form": [
-        "vmid",
-        "name",
+        "agent",
+        "boot",
         "cores",
+        "description",
+        "ide2",
         "memory",
+        "name",
+        "net0",
+        "onboot",
+        "ostype",
         "pool",
         "scsi0",
         "scsihw",
-        "ostype",
-        "description",
-        "boot",
         "serial0",
         "vga",
-        "net0",
-        "onboot",
-        "ide2",
-        "agent"
+        "vmid"
       ],
       "measures": [
         {
@@ -133,16 +70,49 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{template}/clone",
+      "effect": "create",
+      "form": [
+        "description",
+        "full",
+        "name",
+        "newid",
+        "pool"
+      ],
+      "values": {
+        "full": [
+          "0"
+        ]
+      },
+      "bind": [
+        "newid"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/nodes/{node}/qemu/{vmid}",
+      "effect": "lose-data",
+      "query": [
+        "destroy-unreferenced-disks"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/qemu/{vmid}/config",
+      "effect": "read"
+    },
+    {
       "method": "PUT",
       "path": "/nodes/{node}/qemu/{vmid}/config",
       "effect": "change",
       "form": [
         "cores",
-        "memory",
-        "tags",
         "description",
+        "digest",
         "ide2",
-        "digest"
+        "memory",
+        "tags"
       ],
       "precondition": "digest",
       "measures": [
@@ -159,38 +129,13 @@
       ]
     },
     {
-      "method": "POST",
-      "path": "/nodes/{node}/qemu/{vmid}/template",
-      "effect": "change"
-    },
-    {
-      "method": "POST",
-      "path": "/nodes/{node}/qemu/{template}/clone",
-      "effect": "create",
-      "form": [
-        "newid",
-        "name",
-        "pool",
-        "full",
-        "description"
-      ],
-      "values": {
-        "full": [
-          "0"
-        ]
-      },
-      "bind": [
-        "newid"
-      ]
-    },
-    {
       "method": "PUT",
       "path": "/nodes/{node}/qemu/{vmid}/resize",
       "effect": "change",
       "form": [
+        "digest",
         "disk",
-        "size",
-        "digest"
+        "size"
       ],
       "precondition": "digest",
       "measures": [
@@ -202,9 +147,9 @@
       ]
     },
     {
-      "method": "POST",
-      "path": "/nodes/{node}/qemu/{vmid}/status/start",
-      "effect": "restart"
+      "method": "GET",
+      "path": "/nodes/{node}/qemu/{vmid}/status/current",
+      "effect": "read"
     },
     {
       "method": "POST",
@@ -223,17 +168,60 @@
     },
     {
       "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/status/start",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
       "path": "/nodes/{node}/qemu/{vmid}/status/stop",
       "effect": "restart"
     },
     {
-      "method": "DELETE",
-      "path": "/nodes/{node}/qemu/{vmid}",
-      "effect": "lose-data",
+      "method": "POST",
+      "path": "/nodes/{node}/qemu/{vmid}/template",
+      "effect": "change"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/status",
+      "effect": "read"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage",
+      "effect": "read",
       "query": [
-        "purge",
-        "destroy-unreferenced-disks"
+        "content"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage/{storage}/content",
+      "effect": "read",
+      "query": [
+        "content"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/storage/{storage}/status",
+      "effect": "read"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/storage/{storage}/upload",
+      "effect": "create",
+      "form": [
+        "checksum",
+        "checksum-algorithm",
+        "content"
+      ],
+      "file": "filename"
+    },
+    {
+      "method": "GET",
+      "path": "/nodes/{node}/tasks/{upid}/status",
+      "effect": "read"
     }
   ]
 }

@@ -1,0 +1,15 @@
+{
+  "imported": {
+    "proxmox_vm_qemu.web[0]": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":2,\"memoryMiB\":2048,\"diskGiB\":24,\"network\":{\"mode\":\"static\",\"address\":\"192.0.2.21/24\",\"gateway\":\"192.0.2.1\",\"dns\":[\"192.0.2.1\"]}}",
+    "proxmox_vm_qemu.old": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":2,\"memoryMiB\":2048,\"diskGiB\":20,\"network\":{\"mode\":\"dhcp\"}}",
+    "proxmox_vm_qemu.slot": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":2,\"memoryMiB\":3072,\"diskGiB\":12,\"network\":{\"mode\":\"static\",\"address\":\"192.0.2.80/24\",\"gateway\":\"192.0.2.1\",\"dns\":[\"192.0.2.1\",\"192.0.2.2\"]},\"stopped\":true}",
+    "proxmox_vm_qemu.unset": "{\"node\":\"pve1\",\"pool\":\"lab\",\"diskStorage\":\"local-lvm\",\"imageStorage\":\"local\",\"bridge\":\"vmbr0\",\"tag\":\"mamela-lab\",\"vmidMin\":7000,\"vmidMax\":7009,\"cpu\":1,\"memoryMiB\":1024,\"diskGiB\":6,\"network\":{\"mode\":\"dhcp\"}}"
+  },
+  "skipped": {
+    "proxmox_lxc.dns": "no kind of provider proxmox imports",
+    "proxmox_vm_qemu.big": "it has 2 sockets",
+    "proxmox_vm_qemu.far": "it is on node pve3",
+    "proxmox_vm_qemu.sata": "it has no disk scsi0 (its disks: sata0)",
+    "proxmox_vm_qemu.web[1]": "it is in pool \"\", not Mamela's pool lab"
+  }
+}
