@@ -80,21 +80,26 @@ less bootstrap.sh                                                 # 一行ずつ
 
 ## 5. VM の作り方
 
-テンプレートは使わない。宣言の `image`（例 `ubuntu-24.04`）から、毎回次のように作る。
+`Proxmox.vm` は、VM と、そのイメージのテンプレート（`ProxmoxTemplate <image>-<node>`）を宣言する。VM は、テンプレートの linked clone として数秒で作る。テンプレートは、宣言の `image`（例 `ubuntu-24.04`）から一度だけ、次のように作る（テンプレートを使わない宣言の VM も同じ手順で作る）。
 
 1. **イメージはこのプロバイダーのコードに固定する**（`proxmox.Images`。URL、sha256、最小ディスク）。ないものは拒む。イメージの更新は、レビューされるコードの変更（新しい版）になる。
 2. **一度だけアップロードする。** Mamela がダウンロードして sha256 を確かめ、イメージ用ストレージに `import` としてアップロードする。Proxmox にも sha256 を確かめさせる。ファイル名に sha256 を含める。
-3. **seed をアップロードする。** Mamela が作る NoCloud の ISO（mamelet、一度きりの登録トークン、ネットワーク）。プロバイダーは中身を見ない。
-4. **イメージから直接 VM を作る**（`import-from`）。止めたまま作り、マーカーを書く。
-5. ディスクを宣言の大きさまで広げ、タグを付ける。タグは作成時に付けられない（Proxmox は pool に入れる前にタグの権限を確かめる）。
-6. **起動は late の変更にする。** Mamela は、その apply のすべての作成を終えてから起動する。初回起動が別の VM のディスクの取り込みと重なると、I/O 待ちで緊急モードに落ちることがあるためである。
+3. **イメージから直接作る**（`import-from`）。止めたまま作り、マーカーを書く。タグを付け、テンプレートにする。
+
+VM は、次のように作る。
+
+1. **seed をアップロードする。** Mamela が作る NoCloud の ISO（mamelet、一度きりの登録トークン、ネットワーク）。プロバイダーは中身を見ない。
+2. **テンプレートを複製する**（linked clone、`full=0`）。止めたまま作り、マーカーを書く。
+3. vCPU とメモリを設定し、seed を付け、ディスクを宣言の大きさまで広げ、タグを付ける。タグは作成時に付けられない（Proxmox は pool に入れる前にタグの権限を確かめる）。
+4. **起動は late の変更にする。** Mamela は、その apply のすべての作成を終えてから起動する。初回起動が別の VM のディスクの取り込みと重なると、I/O 待ちで緊急モードに落ちることがあるためである。
+   - 止めておく宣言（`Proxmox.vm_stopped`、spec の `stopped`）の VM は起動しない。動いていれば、late の `shutdown-vm` でゲストに電源を切るよう頼む（ACPI）。応えないゲストは、明示操作 `stop-vm` で止める。
 
 ### 中断と再試行
 
 - Mamela は、作成を送る前に記録する（VMID）。応答が失われても、同じ VMID に作り直すことはない。
 - 作成が途中で止まった VM（マーカーはあるがタグがない）は「途中」と報告する。Mamela は、記録した VM なら残りの変更（`grow-vm-disk`、`tag-vm`、`start-vm`）を提案する。
 - 起動の変更は、作成と同時でも、止まった VM を見つけたときでも同じ内容にしてある。作成の応答が失われた後も、承認した plan のまま続けられる。
-- しないこと（差分として示し、Mamela が拒む）: ディスクの縮小、イメージの変更、ネットワークの変更。
+- しないこと（差分として示し、Mamela が拒む）: ディスクの縮小、イメージの変更、ネットワークの変更、別のノード・pool・範囲外の VMID への移動（`move-vm`）。
 
 ## 6. guard（apply の前後）
 
@@ -118,12 +123,14 @@ mamela act delete-vm web <pome-dir>                      # 何を送るかを表
 mamela act --confirm web delete-vm web <pome-dir>        # 名前を打ち直したときだけ実行する
 mamela act --confirm web reboot-vm web <pome-dir>        # guest に再起動を頼む（ACPI）
 mamela act --confirm web reset-vm web <pome-dir>         # 応答しない guest をリセットする
+mamela act --confirm web stop-vm web <pome-dir>          # すぐに止める（電源を抜くのと同じ。shutdown に応えない guest 向け）
 ~~~
 
 - **流れ:** 表示 → guard（前）→ 記録 → 許可を発行して送る → guard（後）。
 - **送る直前の確認:** VMID の VM がまだその名前のマーカーを持つことを確かめる。違えば何も送らない。
 - **削除:** 止めてから、ディスクごと消す（`destroy-unreferenced-disks=1`）。バックアップやレプリケーションのジョブから外す `purge` は、クラスタ全体の設定を変えるので使わない。済めば Mamela は作成の記録を消す。
 - **起動で止まった VM:** mamelet が 15 分を超えて報告しなければ、plan は MAM-PLAN-0110 で止める。コンソールで確かめてから `reboot-vm`、応答しなければ `reset-vm` を使う。
+- **停止:** `stop-vm` で止めても、動かす宣言の VM は、次の plan が `start-vm` でまた起動する。止めておくなら、宣言を `Proxmox.vm_stopped` にする。
 
 ## 8. 旧組み込みプロバイダーの VM を引き継ぐ（adopt-vm）
 
@@ -143,7 +150,30 @@ Mamela 0.2 までの組み込みの Proxmox プロバイダーが作った VM �
 
 引き継げるのは、pool と VMID の範囲にあり、旧マーカーの状態が `ready` で、宣言にある名前の VM だけである。
 
-## 9. 後片付け
+## 9. Terraform で作った VM を移す（mamela import terraform）
+
+Terraform（bpg/proxmox の `proxmox_virtual_environment_vm`、Telmate/proxmox の `proxmox_vm_qemu`）が作った VM を、作り直さずに Mamela へ移せる。詳しい条件は [README](../README.md#terraform-からの乗り換えmamela-の-adr-0009) にある。
+
+lab のクラスタには、別の Terraform が管理する本番のゲストもある。そのため、次のことを守る。
+
+- **境界の外は取り込まない:** 取り込むのは、guard の設定の node・pool・VMID の範囲の中にある VM だけである。state に本番のゲストが入っていても、プロバイダーが理由とともに外す。範囲の外の VM の VMID は、その場で変えられない。
+- **取り込みは何も変えない:** `mamela import terraform` は、Proxmox に何も送らない。宣言（`src/imported.emel`）を書き、引き継ぐ対象を SQLite に記録するだけである。
+- **引き継ぎは 1 台ずつ:** `adopt-vm` は、VM の説明にマーカーを書き、タグを guard の `tag` に置き換える。それ以外は変えない。送る前に、境界の中にあること、設定が観測したときのまま（digest）であることを確かめる。guard も前後に走る。
+- **`terraform state rm` は、表示されたアドレスにだけ使う:** 引き継いだ VM だけを Terraform から外す。取り込まなかったもの（境界の外）は、Terraform が管理し続ける。
+
+~~~bash
+mamela guard <pome-dir>                                                    # まず境界を確かめる
+terraform show -json > /tmp/state.json                                     # Terraform のディレクトリで
+mamela import terraform --dry-run --state /tmp/state.json --providers mamela.providers.toml <pome-dir>
+mamela import terraform --state /tmp/state.json --providers mamela.providers.toml <pome-dir>
+mamela plan <pome-dir>                                                     # 取り込んだ VM は「引き継ぐ対象」（MAM-PLAN-0114）
+mamela act adopt-vm "ProxmoxVM <name>" <pome-dir>                          # 送るものを確かめる
+mamela act --confirm <name> adopt-vm "ProxmoxVM <name>" <pome-dir>         # 引き継ぐ
+terraform state rm '<address>'                                             # Terraform に忘れさせる
+mamela plan <pome-dir>                                                     # 宣言との差を確かめる
+~~~
+
+## 10. 後片付け
 
 アップロードしたイメージと seed は、Mamela の権限では消さない。ストレージ上のファイルを消すには、そのストレージ全体への `Datastore.Allocate` が要り、同じストレージにある他のゲストのバックアップやテンプレートまで消せてしまうためである。
 
@@ -154,7 +184,7 @@ bash cleanup.sh            # 使われていない mamela-* の一覧を出す�
 bash cleanup.sh --free     # 確かめてから消す
 ~~~
 
-## 10. 運用ルール
+## 11. 運用ルール
 
 - 実機テストは `MAMELA_LAB=1` を明示したときだけ動かす。
 - サイト固有の値、既存ゲストの一覧、Token をコミットしない。ログやテストの fixture にも残さない。
