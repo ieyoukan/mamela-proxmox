@@ -67,7 +67,7 @@ func (*vmKind) Import(o protocol.ImportObject, r kit.Resolver) (kit.Imported, er
 
 // Find implements kit.Finder: the VM with the IDs a declaration was imported with, though it
 // carries no marker (List gives only VMs with one). A VM with a marker of Mamela's, or a template,
-// is never found: it is not one to adopt. Whether it is inside the boundary is the declaration's
+// is never found: it is not one to adopt; but a clone that only copied a template's marker is. Whether it is inside the boundary is the declaration's
 // (claim).
 func (k *vmKind) Find(c *kit.Client, id map[string]string) (*kit.Object, error) {
 	vmid, err := strconv.ParseInt(id["vmid"], 10, 64)
@@ -84,7 +84,7 @@ func (k *vmKind) Find(c *kit.Client, id map[string]string) (*kit.Object, error) 
 		return nil, nil
 	}
 	cfg, err := rd.config(vm.Node, vmid)
-	if err != nil || marked(cfg.Description) || cfg.Template {
+	if err != nil || marked(cfg.Description) && !copiedTemplateMarker(vm.Name, cfg) || cfg.Template {
 		return nil, err
 	}
 	x := vmObject(vm, cfg, marker{}, originUnmarked)
@@ -118,7 +118,7 @@ func (v tfVM) outside(s GuardSettings) string {
 	switch {
 	case v.Template:
 		return "it is a template: Mamela makes its own templates from pinned images (ProxmoxTemplate); this one stays Terraform's"
-	case marked(v.Description):
+	case marked(v.Description) && !(strings.HasPrefix(strings.TrimSpace(v.Description), TemplateMarker) && !v.Template):
 		return "it carries a marker of Mamela's: it is Mamela's already; remove it from Terraform's state (terraform state rm)"
 	case v.Node != s.Node:
 		return fmt.Sprintf("it is on node %s, and Mamela's boundary is node %s ([provider.proxmox.guard] node): Mamela never touches a guest "+

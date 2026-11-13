@@ -46,6 +46,16 @@ func parseTemplateMarker(description string) (marker, bool) {
 	return parseMarkerAfter(TemplateMarker, description)
 }
 
+// copiedTemplateMarker says whether a VM carries a template's marker only because it was cloned
+// from the template by someone else (Terraform's clone copies the description): it is not a
+// template, and it is a linked clone or has another name. Mamela makes its templates from images,
+// never by cloning, under the marker's name. Such a VM is neither Mamela's template nor Mamela's
+// VM; it can be imported and adopted. name is the VM's name ("" when not known).
+func copiedTemplateMarker(name string, cfg vmConfig) bool {
+	m, ok := parseTemplateMarker(cfg.Description)
+	return ok && !cfg.Template && (baseOf(cfg.SCSI0) != 0 || name != "" && name != m.Name)
+}
+
 var (
 	createTemplateVM = protocol.Call{Method: "POST", Path: "/nodes/{node}/qemu", Form: []string{"vmid", "name", "pool", "description", "ostype",
 		"scsihw", "scsi0", "boot", "serial0", "vga", "net0", "agent"}}
@@ -156,7 +166,7 @@ func (k *templateKind) List(c *kit.Client) ([]kit.Object, error) {
 			return nil, err
 		}
 		m, ok := parseTemplateMarker(cfg.Description)
-		if !ok {
+		if !ok || copiedTemplateMarker(vm.Name, cfg) {
 			continue
 		}
 		st := TemplateState{Image: m.Image, Template: cfg.Template, Pool: vm.Pool, Tags: cfg.Tags}

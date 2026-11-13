@@ -196,7 +196,7 @@ func ensureOwn(c *kit.Client, ch protocol.Change, node string, vmid int64) error
 	if ch.Op == OpAdopt {
 		switch m, ok = parseOldMarker(cfg.Description); {
 		case ok:
-		case !marked(cfg.Description) && ch.Precondition != "":
+		case (!marked(cfg.Description) || copiedTemplateMarker("", cfg)) && ch.Precondition != "":
 			// Imported (no marker): the version it was prepared on says it is the same VM.
 			m, ok = marker{Name: nameOf(ch.Resource)}, true
 		}

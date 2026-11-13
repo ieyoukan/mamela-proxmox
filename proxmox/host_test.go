@@ -202,3 +202,22 @@ func TestAdoptableOnlyInsideTheBoundary(t *testing.T) {
 		t.Errorf("Mamela's VM b is to be adopted as x: %+v", o)
 	}
 }
+
+// Terraform's clone of Mamela's template copies the template's marker into the clone's description
+// (as found on a real cluster). The clone is not the template: the template is observed as itself,
+// and the clone, imported, is found by its IDs to adopt.
+func TestCloneWithACopiedTemplateMarker(t *testing.T) {
+	world := madeWorld()
+	world.Put(fakepve.VM{VMID: 7004, Name: "tf-legacy-1", Node: "pve1", Pool: "lab", Cores: 1, Memory: 1024, DiskGiB: 10, Tags: "mamela-lab",
+		Base: 7009, Description: templateMarker("ubuntu-24.04-pve1", "ubuntu-24.04"), Net0: "virtio=BC:24:11:00:00:04,bridge=vmbr0"})
+	tmpl := declare(KindTemplate, "ubuntu-24.04-pve1", `{`+testSite+`,"image":"ubuntu-24.04"}`)
+	legacy := declare(Kind, "legacy", `{`+testSite+`,"cpu":1,"memoryMiB":1024,"diskGiB":10,"network":{"mode":"dhcp"},"stopped":true}`)
+	got := observe(t, world, protocol.ObserveParams{Resources: []protocol.Resource{tmpl, legacy},
+		Adopting: []protocol.Adopting{{Resource: "ProxmoxVM legacy", IDs: map[string]string{"node": "pve1", "vmid": "7004"}}}})
+	if o := got["ProxmoxTemplate ubuntu-24.04-pve1"]; o.IDs["vmid"] != "7009" || o.Unfinished {
+		t.Errorf("the template is taken for its clone: %+v", o)
+	}
+	if o := got["ProxmoxVM legacy"]; !o.Exists || !o.Adoptable || o.Owned || o.IDs["vmid"] != "7004" {
+		t.Errorf("the imported clone is not found to adopt: %+v", o)
+	}
+}
