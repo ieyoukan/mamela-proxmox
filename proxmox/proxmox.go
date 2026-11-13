@@ -285,6 +285,7 @@ func spec(v jsontext.Value) (Spec, error) {
 func (s Spec) inRange(vmid int64) bool { return vmid >= s.VMIDMin && vmid <= s.VMIDMax }
 
 type vmConfig struct {
+	Name        string // the VM's name
 	Digest      string
 	Description string
 	Cores       int64
@@ -314,7 +315,7 @@ func (c *vmConfig) UnmarshalJSON(b []byte) error {
 		n, _ := strconv.ParseInt(text(k), 10, 64)
 		return n
 	}
-	c.Digest, c.Description = text("digest"), text("description")
+	c.Name, c.Digest, c.Description = text("name"), text("digest"), text("description")
 	c.Cores, c.Sockets, c.Memory = num("cores"), num("sockets"), num("memory")
 	if c.Cores == 0 {
 		c.Cores = 1 // the Proxmox default

@@ -50,8 +50,11 @@ func parseTemplateMarker(description string) (marker, bool) {
 // from the template by someone else (Terraform's clone copies the description): it is not a
 // template, and it is a linked clone or has another name. Mamela makes its templates from images,
 // never by cloning, under the marker's name. Such a VM is neither Mamela's template nor Mamela's
-// VM; it can be imported and adopted. name is the VM's name ("" when not known).
+// VM; it can be imported and adopted. name is the VM's name (its configuration's when "").
 func copiedTemplateMarker(name string, cfg vmConfig) bool {
+	if name == "" {
+		name = cfg.Name
+	}
 	m, ok := parseTemplateMarker(cfg.Description)
 	return ok && !cfg.Template && (baseOf(cfg.SCSI0) != 0 || name != "" && name != m.Name)
 }

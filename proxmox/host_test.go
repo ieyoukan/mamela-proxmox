@@ -208,8 +208,9 @@ func TestAdoptableOnlyInsideTheBoundary(t *testing.T) {
 // and the clone, imported, is found by its IDs to adopt.
 func TestCloneWithACopiedTemplateMarker(t *testing.T) {
 	world := madeWorld()
+	// As bpg/proxmox made it: its disk given (so not linked to the template), its own name.
 	world.Put(fakepve.VM{VMID: 7004, Name: "tf-legacy-1", Node: "pve1", Pool: "lab", Cores: 1, Memory: 1024, DiskGiB: 10, Tags: "mamela-lab",
-		Base: 7009, Description: templateMarker("ubuntu-24.04-pve1", "ubuntu-24.04"), Net0: "virtio=BC:24:11:00:00:04,bridge=vmbr0"})
+		Description: templateMarker("ubuntu-24.04-pve1", "ubuntu-24.04"), Net0: "virtio=BC:24:11:00:00:04,bridge=vmbr0"})
 	tmpl := declare(KindTemplate, "ubuntu-24.04-pve1", `{`+testSite+`,"image":"ubuntu-24.04"}`)
 	legacy := declare(Kind, "legacy", `{`+testSite+`,"cpu":1,"memoryMiB":1024,"diskGiB":10,"network":{"mode":"dhcp"},"stopped":true}`)
 	got := observe(t, world, protocol.ObserveParams{Resources: []protocol.Resource{tmpl, legacy},

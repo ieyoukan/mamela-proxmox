@@ -33,8 +33,11 @@ func (s *Server) AddTerraformVMs() TerraformVMs {
 		Description: "db (Terraform)", Net0: "virtio=BC:24:11:00:00:06,bridge=vmbr0"})
 	add(VM{VMID: 7007, Name: "drifted", Node: "pve1", Pool: "lab", Cores: 2, Sockets: 1, Memory: 1024, DiskGiB: 12, Tags: "terraform;legacy-app",
 		Running: true, Description: "drifted (Terraform)", Net0: "virtio=BC:24:11:00:00:07,bridge=vmbr0"})
+	// Cloned by bpg/proxmox from Mamela's template: the clone carries a copy of the template's
+	// marker (as on a real cluster), which does not make it Mamela's.
 	add(VM{VMID: 7008, Name: "batch", Node: "pve1", Pool: "lab", Cores: 1, Memory: 1024, DiskGiB: 8, Tags: "terraform",
-		Running: true, Description: "Managed by Terraform.", Net0: "virtio=BC:24:11:00:00:08,bridge=vmbr0"})
+		Running: true, Net0: "virtio=BC:24:11:00:00:08,bridge=vmbr0",
+		Description: "Managed by Mamela (proxmox provider): a template. Do not edit the lines below.\nmamela-name: ubuntu-24.04-pve1\nmamela-image: ubuntu-24.04\n"})
 	// Outside the boundary: Terraform's too, and never touched.
 	add(VM{VMID: 120, Name: "legacy", Node: "pve1", Cores: 4, Memory: 8192, DiskGiB: 64, Tags: "terraform", Running: true,
 		Description: "Managed by Terraform.", Net0: "virtio=BC:24:11:00:01:20,bridge=vmbr0", Uptime: 86400})
