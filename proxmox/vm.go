@@ -49,7 +49,7 @@ func (*vmKind) Operations() []protocol.Operation {
 			"or declare it where it is"),
 		kit.Unsupported(OpCreateNoImage, "a VM without an image was imported to adopt, and it is not there: Mamela creates a VM only from "+
 			"one of its pinned images; declare one, or remove the declaration"),
-		kit.ExplicitOp(OpDelete, atPool("VM.PowerMgmt", "VM.Allocate"), stopVM, deleteVM),
+		kit.RemoveOp(OpDelete, atPool("VM.PowerMgmt", "VM.Allocate"), stopVM, deleteVM),
 		kit.ExplicitOp(OpReboot, atPool("VM.PowerMgmt"), rebootVM),
 		kit.ExplicitOp(OpReset, atPool("VM.PowerMgmt"), resetVM),
 		kit.ExplicitOp(OpStop, atPool("VM.PowerMgmt"), stopVM),
