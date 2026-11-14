@@ -12,11 +12,13 @@ if [[ "$got_go" != "$want_go" ]]; then
   echo "build with $want_go (this is $got_go): GOTOOLCHAIN=$want_go ./build.sh" >&2
   exit 1
 fi
-# The catalog of the API (ADR 0008 of Mamela), as data in the Pome.
+# The catalog of the API (ADR 0008 of Mamela), as data in the Pome: generated from the provider's
+# manifest and the reviewed table (catalogs/review.go). With PVE_APIDOC (Proxmox VE's apidoc.js, the
+# one catalogs/pve-api.lock names), it is first checked against Proxmox VE's API schema.
 mkdir -p pome/catalogs
 GOWORK=off go run ./cmd/proxmox-catalogs pome/catalogs
 out=pome/provider.wasm
-GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -o "$out" ./cmd/proxmox-provider
+GOOS=wasip1 GOARCH=wasm GOWORK=off go build -trimpath -buildvcs=false -o "$out" ./cmd/proxmox-provider
 sum="$(shasum -a 256 "$out" | cut -d' ' -f1)"
 version="$(sed -n 's/^\tVersion = "\(.*\)"$/\1/p' proxmox/proxmox.go)"
 cat > pome/mamela-provider.toml <<TOML
@@ -32,4 +34,8 @@ sha256 = "$sum"
 [catalogs]
 proxmox = "catalogs/proxmox.json"
 TOML
+# The typed declarations of the kinds (src/kinds.emel, module Proxmox.Kinds), generated from the
+# program's manifest: what `mamela import terraform` writes declarations with. src/lib.emel is written
+# by hand. It needs Mamela's toolchain (emela, wasmtime): MAMELA_TOOLCHAIN_DIR, or .tools/bin above.
+GOWORK=off go tool mamela provider pome --out src/kinds.emel pome >/dev/null
 echo "$out $sum (version $version)"

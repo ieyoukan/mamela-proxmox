@@ -37,6 +37,11 @@ type VM struct {
 	Template    bool              // converted to a template
 	Base        int64             // the template it is a linked clone of
 	IDE2        string            // the seed's drive
+	// A VM someone else made (Terraform) may have more than one socket, its disk on another
+	// storage (local-lvm when empty) and its network device written out (net0).
+	Sockets     int64
+	DiskStorage string
+	Net0        string
 }
 
 func (v VM) digest() string {
@@ -100,6 +105,9 @@ func reply(w http.ResponseWriter, status int, data any) {
 
 // diskOption writes the size as Proxmox does: in MiB after an import (3.5 GiB), in GiB once resized.
 func diskOption(v *VM) string {
+	if v.DiskStorage != "" && v.DiskStorage != "local-lvm" {
+		return fmt.Sprintf("%s:vm-%d-disk-0,size=%dG", v.DiskStorage, v.VMID, v.DiskGiB)
+	}
 	switch {
 	case v.Template:
 		return fmt.Sprintf("local-lvm:base-%d-disk-0,discard=on,size=3584M", v.VMID)
@@ -136,8 +144,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if v.Type != "" {
 				typ = v.Type
 			}
-			out = append(out, map[string]any{"vmid": v.VMID, "name": v.Name, "node": v.Node, "pool": v.Pool, "type": typ,
-				"status": status, "uptime": uptime})
+			r := map[string]any{"vmid": v.VMID, "name": v.Name, "node": v.Node, "pool": v.Pool, "type": typ,
+				"status": status, "uptime": uptime}
+			if v.Template {
+				r["template"] = 1
+			}
+			out = append(out, r)
 		}
 		reply(w, 200, out)
 	})
@@ -194,6 +206,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if v.IDE2 != "" {
 				cfg["ide2"] = v.IDE2
+			}
+			if v.Sockets != 0 {
+				cfg["sockets"] = v.Sockets
+			}
+			switch {
+			case v.Net0 != "":
+				cfg["net0"] = v.Net0
+			case v.Config["net0"] != "":
+				cfg["net0"] = v.Config["net0"]
 			}
 			reply(w, 200, cfg)
 		}
@@ -382,6 +403,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			reply(w, 200, upid(v.Node, "qmreset", v.VMID))
+		}
+	})
+	// A shutdown asks the guest to power off: the fake's guests always do.
+	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if v := vm(w, r); v != nil {
+			if !v.Running {
+				reply(w, 500, "VM is not running")
+				return
+			}
+			v.Running = false
+			reply(w, 200, upid(v.Node, "qmshutdown", v.VMID))
 		}
 	})
 	mux.HandleFunc("POST /nodes/{node}/qemu/{vmid}/status/stop", func(w http.ResponseWriter, r *http.Request) {

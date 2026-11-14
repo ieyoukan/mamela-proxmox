@@ -1,0 +1,295 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.8.5",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "proxmox_lxc.dns",
+          "mode": "managed",
+          "type": "proxmox_lxc",
+          "name": "dns",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": { "hostname": "dns", "id": "pve1/lxc/130", "target_node": "pve1", "vmid": 130 }
+        },
+        {
+          "address": "proxmox_vm_qemu.big",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "big",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "agent": 1,
+            "cores": 4,
+            "cpu": "host",
+            "desc": "",
+            "disk": [{ "size": "50G", "slot": 0, "storage": "local-lvm", "type": "scsi" }],
+            "id": "pve1/qemu/7004",
+            "ipconfig0": "ip=dhcp",
+            "memory": 8192,
+            "name": "big",
+            "network": [{ "bridge": "vmbr0", "model": "virtio", "tag": -1 }],
+            "oncreate": true,
+            "pool": "lab",
+            "sockets": 2,
+            "target_node": "pve1",
+            "vmid": 7004
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.far",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "far",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1, "type": "host" }],
+            "disks": [{ "scsi": [{ "scsi0": [{ "disk": [{ "size": "10G", "storage": "local-lvm" }] }] }] }],
+            "id": "pve3/qemu/7006",
+            "memory": 1024,
+            "name": "far",
+            "network": [{ "bridge": "vmbr0", "id": 0, "model": "virtio" }],
+            "pool": "lab",
+            "target_node": "pve3",
+            "vm_state": "running",
+            "vmid": 7006
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.old",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "old",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "additional_wait": 5,
+            "agent": 1,
+            "balloon": 0,
+            "bios": "seabios",
+            "boot": "order=scsi0;ide2;net0",
+            "bootdisk": "",
+            "ci_wait": null,
+            "cicustom": "",
+            "cipassword": null,
+            "ciuser": "ubuntu",
+            "clone": "ubuntu-2204-template",
+            "clone_wait": 10,
+            "cloudinit_cdrom_storage": "local-lvm",
+            "cores": 2,
+            "cpu": "host",
+            "default_ipv4_address": "198.51.100.23",
+            "define_connection_info": true,
+            "desc": "old app server (Terraform)",
+            "disk": [
+              {
+                "aio": "",
+                "backup": true,
+                "cache": "",
+                "discard": "",
+                "file": "vm-7003-disk-0",
+                "format": "raw",
+                "iops": 0,
+                "iothread": 0,
+                "mbps": 0,
+                "media": "",
+                "replicate": 0,
+                "size": "20480M",
+                "slot": 0,
+                "ssd": 0,
+                "storage": "local-lvm",
+                "storage_type": "lvmthin",
+                "type": "scsi",
+                "volume": "local-lvm:vm-7003-disk-0"
+              }
+            ],
+            "force_create": false,
+            "full_clone": true,
+            "hotplug": "network,disk,usb",
+            "id": "pve1/qemu/7003",
+            "ipconfig0": "ip=dhcp",
+            "kvm": true,
+            "memory": 2048,
+            "name": "old-app",
+            "nameserver": "",
+            "network": [
+              { "bridge": "vmbr0", "firewall": false, "link_down": false, "macaddr": "BC:24:11:00:07:03", "model": "virtio", "mtu": 0, "queues": 0, "rate": 0, "tag": -1 }
+            ],
+            "numa": false,
+            "onboot": true,
+            "oncreate": true,
+            "os_type": "cloud-init",
+            "pool": "lab",
+            "qemu_os": "other",
+            "scsihw": "virtio-scsi-pci",
+            "sockets": 1,
+            "sshkeys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample user@example\n",
+            "tags": "app,terraform",
+            "target_node": "pve1",
+            "vcpus": 0,
+            "vmid": 7003
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.sata",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "sata",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "disks": [{ "ide": [], "sata": [{ "sata0": [{ "disk": [{ "size": "16G", "storage": "local-lvm" }] }] }], "scsi": [], "virtio": [] }],
+            "id": "pve1/qemu/7005",
+            "memory": 1024,
+            "name": "sata",
+            "network": [{ "bridge": "vmbr0", "id": 0 }],
+            "pool": "lab",
+            "target_node": "pve1",
+            "vmid": 7005
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.slot",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "slot",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cores": 2,
+            "cpu": "x86-64-v2-AES",
+            "description": "a disk block of 3.x (Terraform)",
+            "disk": [
+              { "slot": "ide2", "storage": "local-lvm", "type": "cloudinit" },
+              { "size": "12G", "slot": "scsi0", "storage": "local-lvm", "type": "disk" }
+            ],
+            "disks": [],
+            "id": "pve1/qemu/7008",
+            "ipconfig0": "ip=192.0.2.80/24,gw=192.0.2.1",
+            "memory": 3072,
+            "name": "slot",
+            "nameserver": "192.0.2.1 192.0.2.2",
+            "network": [
+              { "bridge": "vmbr1", "id": 1, "model": "virtio" },
+              { "bridge": "vmbr0", "id": 0, "model": "virtio" }
+            ],
+            "pool": "lab",
+            "sockets": 1,
+            "tags": "terraform",
+            "target_node": "pve1",
+            "vm_state": "stopped",
+            "vmid": 7008
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.unset",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "unset",
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 1, "sockets": 1 }],
+            "disks": [{ "scsi": [{ "scsi0": [{ "disk": [{ "size": 6, "storage": "local-lvm" }] }] }] }],
+            "id": "pve1/qemu/7009",
+            "memory": 1024,
+            "name": "unset",
+            "network": [{ "bridge": "vmbr0", "id": 0 }],
+            "pool": "lab",
+            "target_node": "",
+            "vmid": 0
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.web[0]",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "web",
+          "index": 0,
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "additional_wait": 5,
+            "agent": 1,
+            "agent_timeout": 90,
+            "automatic_reboot": true,
+            "balloon": 0,
+            "bios": "seabios",
+            "boot": "order=scsi0",
+            "ciuser": "ubuntu",
+            "clone": "ubuntu-template",
+            "cores": 0,
+            "cpu": [{ "affinity": "", "cores": 2, "flags": [], "limit": 0, "numa": false, "sockets": 1, "type": "host", "units": 0, "vcores": 0 }],
+            "default_ipv4_address": "192.0.2.21",
+            "desc": "",
+            "description": "web 0 (Terraform)",
+            "disk": [],
+            "disks": [
+              {
+                "ide": [{ "ide0": [], "ide1": [{ "cdrom": [], "cloudinit": [{ "storage": "local-lvm" }], "disk": [], "passthrough": [] }], "ide2": [], "ide3": [] }],
+                "sata": [],
+                "scsi": [
+                  {
+                    "scsi0": [
+                      {
+                        "cdrom": [],
+                        "cloudinit": [],
+                        "disk": [{ "asyncio": "", "backup": true, "cache": "", "discard": true, "emulatessd": false, "format": "raw", "id": 0, "iothread": true, "linked_disk_id": -1, "readonly": false, "replicate": true, "serial": "", "size": "24G", "storage": "local-lvm", "wwn": "" }],
+                        "passthrough": []
+                      }
+                    ],
+                    "scsi1": []
+                  }
+                ],
+                "virtio": []
+              }
+            ],
+            "efidisk": [],
+            "full_clone": true,
+            "id": "pve1/qemu/7001",
+            "ipconfig0": "ip=192.0.2.21/24,gw=192.0.2.1",
+            "memory": 2048,
+            "name": "web-0",
+            "nameserver": "192.0.2.1",
+            "network": [{ "bridge": "vmbr0", "firewall": false, "id": 0, "link_down": false, "macaddr": "BC:24:11:00:07:01", "model": "virtio", "mtu": 0, "queues": 0, "rate": 0, "tag": 0 }],
+            "onboot": true,
+            "os_type": "cloud-init",
+            "pool": "lab",
+            "qemu_os": "l26",
+            "scsihw": "virtio-scsi-single",
+            "sockets": 0,
+            "tags": "terraform;web",
+            "target_node": "pve1",
+            "vm_state": "running",
+            "vmid": 7001
+          }
+        },
+        {
+          "address": "proxmox_vm_qemu.web[1]",
+          "mode": "managed",
+          "type": "proxmox_vm_qemu",
+          "name": "web",
+          "index": 1,
+          "provider_name": "registry.terraform.io/telmate/proxmox",
+          "schema_version": 0,
+          "values": {
+            "cpu": [{ "cores": 2, "sockets": 1 }],
+            "disks": [{ "scsi": [{ "scsi0": [{ "disk": [{ "size": "24G", "storage": "local-lvm" }] }] }] }],
+            "id": "pve1/qemu/7002",
+            "memory": 2048,
+            "name": "web-1",
+            "network": [{ "bridge": "vmbr0", "id": 0 }],
+            "pool": "",
+            "target_node": "pve1",
+            "vm_state": "running",
+            "vmid": 7002
+          }
+        }
+      ]
+    }
+  }
+}

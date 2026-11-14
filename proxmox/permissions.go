@@ -38,20 +38,21 @@ func at(ref, why string, privs ...string) Privilege {
 var Catalog = map[string][]Privilege{
 	"GET /cluster/resources": {at(AtPool, "list the pool's VMs (only VMs with VM.Audit are listed)", "VM.Audit"),
 		at(AtPool, "be told which pool each VM is in (left out without Pool.Audit)", "Pool.Audit")},
-	"GET /nodes/{node}/storage/{storage}/content":  {at(AtImageStorage, "find uploaded images and seeds", "Datastore.Audit", "Datastore.AllocateSpace")},
-	"POST /nodes/{node}/storage/{storage}/upload":  {at(AtImageStorage, "upload the pinned image (import) and seeds (iso)", "Datastore.AllocateTemplate")},
-	"GET /nodes/{node}/tasks/{upid}/status":        nil, // the caller's own tasks are open to it
-	"GET /nodes/{node}/qemu/{vmid}/config":         {at(AtPool, "read a VM's configuration and marker", "VM.Audit")},
-	"GET /nodes/{node}/qemu/{vmid}/status/current": {at(AtPool, "read a VM's state", "VM.Audit")},
-	"POST /nodes/{node}/qemu":                      {at(AtPool, "create a VM in the pool", "VM.Allocate")},
-	"PUT /nodes/{node}/qemu/{vmid}/config":         nil, // each parameter's (ConfigParams)
-	"PUT /nodes/{node}/qemu/{vmid}/resize":         {at(AtPool, "grow a VM's disk", "VM.Config.Disk"), at(AtDiskStorage, "grow a disk on the disk storage", "Datastore.AllocateSpace")},
-	"POST /nodes/{node}/qemu/{vmid}/status/start":  {at(AtPool, "start a VM", "VM.PowerMgmt")},
-	"POST /nodes/{node}/qemu/{vmid}/status/reboot": {at(AtPool, "restart a VM", "VM.PowerMgmt")},
-	"POST /nodes/{node}/qemu/{vmid}/status/reset":  {at(AtPool, "reset a VM", "VM.PowerMgmt")},
-	"POST /nodes/{node}/qemu/{vmid}/status/stop":   {at(AtPool, "stop a VM before deleting it", "VM.PowerMgmt")},
-	"DELETE /nodes/{node}/qemu/{vmid}":             {at(AtPool, "delete a VM and its disks", "VM.Allocate")},
-	"POST /nodes/{node}/qemu/{vmid}/template":      {at(AtPool, "convert a VM to a template", "VM.Allocate")},
+	"GET /nodes/{node}/storage/{storage}/content":    {at(AtImageStorage, "find uploaded images and seeds", "Datastore.Audit", "Datastore.AllocateSpace")},
+	"POST /nodes/{node}/storage/{storage}/upload":    {at(AtImageStorage, "upload the pinned image (import) and seeds (iso)", "Datastore.AllocateTemplate")},
+	"GET /nodes/{node}/tasks/{upid}/status":          nil, // the caller's own tasks are open to it
+	"GET /nodes/{node}/qemu/{vmid}/config":           {at(AtPool, "read a VM's configuration and marker", "VM.Audit")},
+	"GET /nodes/{node}/qemu/{vmid}/status/current":   {at(AtPool, "read a VM's state", "VM.Audit")},
+	"POST /nodes/{node}/qemu":                        {at(AtPool, "create a VM in the pool", "VM.Allocate")},
+	"PUT /nodes/{node}/qemu/{vmid}/config":           nil, // each parameter's (ConfigParams)
+	"PUT /nodes/{node}/qemu/{vmid}/resize":           {at(AtPool, "grow a VM's disk", "VM.Config.Disk"), at(AtDiskStorage, "grow a disk on the disk storage", "Datastore.AllocateSpace")},
+	"POST /nodes/{node}/qemu/{vmid}/status/start":    {at(AtPool, "start a VM", "VM.PowerMgmt")},
+	"POST /nodes/{node}/qemu/{vmid}/status/reboot":   {at(AtPool, "restart a VM", "VM.PowerMgmt")},
+	"POST /nodes/{node}/qemu/{vmid}/status/reset":    {at(AtPool, "reset a VM", "VM.PowerMgmt")},
+	"POST /nodes/{node}/qemu/{vmid}/status/stop":     {at(AtPool, "stop a VM (before deleting it, or a guest that does not shut down)", "VM.PowerMgmt")},
+	"POST /nodes/{node}/qemu/{vmid}/status/shutdown": {at(AtPool, "shut down a VM declared stopped", "VM.PowerMgmt")},
+	"DELETE /nodes/{node}/qemu/{vmid}":               {at(AtPool, "delete a VM and its disks", "VM.Allocate")},
+	"POST /nodes/{node}/qemu/{vmid}/template":        {at(AtPool, "convert a VM to a template", "VM.Allocate")},
 	"POST /nodes/{node}/qemu/{template}/clone": {at(AtPool, "clone the template (in the pool)", "VM.Clone"),
 		at(AtPool, "make the clone in the pool", "VM.Allocate"), at(AtDiskStorage, "the clone's disk", "Datastore.AllocateSpace")},
 }

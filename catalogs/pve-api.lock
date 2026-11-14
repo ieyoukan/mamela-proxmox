@@ -1,0 +1,5 @@
+# Proxmox VE's API schema (the apidoc.js of pve-docs) that pome/catalogs/proxmox.json and the permission
+# catalog (proxmox/permissions.go) were last checked against: its pve-manager release and sha256.
+# Written by go run ./cmd/proxmox-catalogs -schema <apidoc.js> -pve-manager <release> -update-lock (README).
+pve-manager 9.2.26
+sha256 68a8ac7b4994525a1df5530e2d96f4fc76b6401f07861ac8a51635a0b9ce7c53

@@ -17,7 +17,7 @@ var goodCredentials = protocol.ScriptCredentials{TokenID: "mamela@pve!lab", Toke
 
 func script(t *testing.T, name string) string {
 	t.Helper()
-	res, err := Provider{}.Script(context.Background(), protocol.ScriptParams{Name: name, Settings: []byte(goodSettings), Credentials: goodCredentials})
+	res, err := New().Script(context.Background(), protocol.ScriptParams{Name: name, Settings: []byte(goodSettings), Credentials: goodCredentials})
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -44,7 +44,8 @@ func TestBootstrap(t *testing.T) {
 			t.Errorf("grants the operating token too much: %s", l)
 		}
 	}
-	if !strings.Contains(script(t, "permissions"), "VM.Allocate") || !strings.Contains(script(t, "cleanup"), "--free") {
+	if !strings.Contains(script(t, "permissions"), "VM.Allocate") || !strings.Contains(script(t, "cleanup"), "--free") ||
+		!strings.Contains(script(t, "cleanup"), "grep -v ':import/'") {
 		t.Error("permissions or cleanup is incomplete")
 	}
 }
@@ -65,7 +66,7 @@ func TestScriptRejects(t *testing.T) {
 	} {
 		p := protocol.ScriptParams{Name: "bootstrap", Settings: []byte(goodSettings), Credentials: goodCredentials}
 		edit(&p)
-		if _, err := (Provider{}).Script(context.Background(), p); err == nil {
+		if _, err := New().Script(context.Background(), p); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
