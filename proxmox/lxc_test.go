@@ -176,10 +176,21 @@ func TestLXCObservedIDsKeepTheirShape(t *testing.T) {
 	}
 }
 
+// A declaration that names, by its VMID, the container another declaration has (it carries that
+// one's marker) is an error of the declaration: observe fails and says so (kit), rather than
+// planning a container to create there.
+func TestLXCNamingMamelasContainerFails(t *testing.T) {
+	var res protocol.ObserveResult
+	err := call(t, lxcWorld(), protocol.MethodObserve, protocol.ObserveParams{Resources: []protocol.Resource{lxcDecl("taken", 7007, "")}}, &res)
+	if err == nil || !strings.Contains(err.Error(), "Mamela's already (ProxmoxLXC other)") {
+		t.Fatalf("observe of a declaration naming another's container: %v", err)
+	}
+}
+
 // A container is adoptable only inside the declared boundary, without a mark of Mamela's, and only
 // a container: anything else at the declared VMID is reported, and Mamela never creates one.
 func TestLXCAdoptableOnlyInsideTheBoundary(t *testing.T) {
-	decls := []protocol.Resource{lxcDecl("dns", 7005, `"cores":2`), lxcDecl("elsewhere", 7006, ""), lxcDecl("taken", 7007, ""),
+	decls := []protocol.Resource{lxcDecl("dns", 7005, `"cores":2`), lxcDecl("elsewhere", 7006, ""),
 		lxcDecl("qemu", 7008, ""), lxcDecl("vmmarked", 7003, ""), lxcDecl("none", 7009, "")}
 	got := observe(t, lxcWorld(), protocol.ObserveParams{Resources: decls})
 	if o := got["ProxmoxLXC dns"]; !o.Adoptable || o.Owned {
@@ -192,7 +203,6 @@ func TestLXCAdoptableOnlyInsideTheBoundary(t *testing.T) {
 		t.Errorf("the description of a container outside the boundary is kept: %+v", st)
 	}
 	for id, why := range map[string]string{
-		"ProxmoxLXC taken":    "Mamela's already, for ProxmoxLXC other",
 		"ProxmoxLXC qemu":     "is a VM (qemu), not a container",
 		"ProxmoxLXC vmmarked": "a mark of Mamela's that is not a container's marker",
 		"ProxmoxLXC none":     "no container has VMID 7009",
@@ -215,7 +225,7 @@ func TestLXCAdoptableOnlyInsideTheBoundary(t *testing.T) {
 		}
 		creates[c.Resource] = c
 	}
-	if len(creates) != 4 || !strings.Contains(creates["ProxmoxLXC qemu"].Reasons[0], "declare it as a ProxmoxVM") ||
+	if len(creates) != 3 || !strings.Contains(creates["ProxmoxLXC qemu"].Reasons[0], "declare it as a ProxmoxVM") ||
 		!strings.Contains(creates["ProxmoxLXC none"].Reasons[0], "Mamela does not create containers") {
 		t.Errorf("creates: %+v", res.Changes)
 	}
