@@ -57,4 +57,21 @@ var Reviewed = map[string]Review{
 	// Deleting destroys the VM's disks (destroy-unreferenced-disks); purge, which also changes the
 	// cluster's backup and replication jobs, is not declared.
 	"DELETE /nodes/{node}/qemu/{vmid}": {Handler: "destroy_vm"},
+
+	// Containers: adopted (made by hand), never created or deleted.
+	"PUT /nodes/{node}/lxc/{vmid}/config": {Handler: "update_vm", Effect: protocol.EffectChange,
+		Why: "changes a container's configuration in place; only the parameters listed can be sent (cores, memory, swap, start at boot, " +
+			"tags and the description): none touches its root filesystem, mount points or network. Proxmox applies cores, memory and swap " +
+			"to a running container at once, without restarting it (less memory than it uses makes its kernel reclaim memory, or stop " +
+			"processes in it)",
+		Precondition: "digest", Measures: []protocol.Measure{cpu, memory}, Values: map[string][]string{"onboot": {"0", "1"}}},
+	"PUT /nodes/{node}/lxc/{vmid}/resize": {Handler: "resize_vm", Effect: protocol.EffectChange,
+		Why: "grows a container's root filesystem in place and keeps its data (a running container keeps running): Proxmox refuses " +
+			"a smaller size; only the root filesystem (disk=rootfs), never a mount point",
+		Precondition: "digest", Measures: []protocol.Measure{{Param: "size", Name: protocol.MeasureDiskGiB, Format: protocol.FormatSize}},
+		Values: map[string][]string{"disk": {"rootfs"}}},
+	"POST /nodes/{node}/lxc/{vmid}/status/start":    {Handler: "vm_start"},
+	"POST /nodes/{node}/lxc/{vmid}/status/shutdown": {Handler: "vm_shutdown"},
+	"POST /nodes/{node}/lxc/{vmid}/status/stop":     {Handler: "vm_stop"},
+	"POST /nodes/{node}/lxc/{vmid}/status/reboot":   {Handler: "vm_reboot"},
 }

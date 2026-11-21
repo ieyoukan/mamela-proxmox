@@ -1,6 +1,6 @@
-// Package fakepve is a fake of the Proxmox VE API calls the provider uses, for its tests: VMs and
-// storage contents in memory, tasks that end at once, and configuration digests that refuse a
-// change based on an older read (HTTP 500, as Proxmox does).
+// Package fakepve is a fake of the Proxmox VE API calls the provider uses, for its tests: VMs,
+// containers and storage contents in memory, tasks that end at once, and configuration digests
+// that refuse a change based on an older read (HTTP 500, as Proxmox does).
 package fakepve
 
 import (
@@ -19,7 +19,7 @@ import (
 	"sync"
 )
 
-// VM is one fake VM.
+// VM is one fake guest: a VM, or a container (Type lxc).
 type VM struct {
 	VMID        int64
 	Name, Node  string
@@ -30,7 +30,7 @@ type VM struct {
 	DiskGiB     int64
 	Tags        string
 	Running     bool
-	Type        string            // qemu (when empty) or lxc: a container is someone else's guest
+	Type        string            // qemu (when empty) or lxc
 	Uptime      int64             // seconds, while running (120 when 0)
 	Config      map[string]string // other parameters, as created
 	Serial      int               // bumped on every change; the digest is derived from it
@@ -42,6 +42,10 @@ type VM struct {
 	Sockets     int64
 	DiskStorage string
 	Net0        string
+	// A container's swap (MiB) and whether it starts at boot; its root filesystem is DiskGiB on
+	// DiskStorage (local-lvm when empty), its cores none (all of the node's) when 0.
+	Swap   int64
+	Onboot bool
 }
 
 func (v VM) digest() string {
@@ -122,6 +126,9 @@ func diskOption(v *VM) string {
 	return fmt.Sprintf("local-lvm:vm-%d-disk-0,discard=on,size=%dG", v.VMID, v.DiskGiB)
 }
 
+// changedFunc reads a change's form and refuses it when its digest is not the configuration's.
+type changedFunc func(w http.ResponseWriter, r *http.Request, v *VM) bool
+
 func upid(node, kind string, vmid int64) string {
 	return fmt.Sprintf("UPID:%s:0000AAAA:0000BBBB:00000000:%s:%d:fake@pve!t:", node, kind, vmid)
 }
@@ -148,6 +155,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"status": status, "uptime": uptime}
 			if v.Template {
 				r["template"] = 1
+			}
+			if v.Tags != "" {
+				r["tags"] = v.Tags
 			}
 			out = append(out, r)
 		}
@@ -176,14 +186,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			perms = map[string]map[string]int{}
 		}
 		reply(w, 200, perms)
-	})
-	mux.HandleFunc("GET /nodes/{node}/lxc/{vmid}/config", func(w http.ResponseWriter, r *http.Request) {
-		id, _ := strconv.ParseInt(r.PathValue("vmid"), 10, 64)
-		if v, ok := s.vms[id]; ok && v.Type == "lxc" {
-			reply(w, 200, map[string]any{"digest": v.digest(), "hostname": v.Name})
-			return
-		}
-		reply(w, 500, nil)
 	})
 	vm := func(w http.ResponseWriter, r *http.Request) *VM {
 		id, _ := strconv.ParseInt(r.PathValue("vmid"), 10, 64)
@@ -331,7 +333,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Config: map[string]string{"net0": src.Config["net0"]}}
 		reply(w, 200, upid(src.Node, "qmclone", src.VMID))
 	})
-	changed := func(w http.ResponseWriter, r *http.Request, v *VM) bool {
+	var changed changedFunc = func(w http.ResponseWriter, r *http.Request, v *VM) bool {
 		r.ParseForm()
 		if d := r.PostForm.Get("digest"); d != "" && d != v.digest() {
 			reply(w, 500, "detected modified configuration")
@@ -443,6 +445,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			reply(w, 200, upid(v.Node, "qmdestroy", v.VMID))
 		}
 	})
+	s.containers(mux, changed)
 	mux.HandleFunc("GET /nodes/{node}/tasks/{upid}/status", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]string{"status": "stopped", "exitstatus": "OK"})
 	})

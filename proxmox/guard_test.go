@@ -103,7 +103,7 @@ func TestOutsideOtherBridgeAndTag(t *testing.T) {
 	c.Requests[0].Params["net0"] = []string{"virtio,bridge=vmbr9"}
 	c.Requests[2].Params["tags"] = []string{"prod"}
 	c.IDs["node"] = "pve2"
-	if got := Outside(settings, c); len(got) != 3 {
+	if got := Outside(settings, c, nil); len(got) != 3 {
 		t.Errorf("want node, bridge and tag outside, got %v", got)
 	}
 }
@@ -211,7 +211,7 @@ func TestStartingAStoppedVMCountsItsMemory(t *testing.T) {
 	if !slices.Contains(codes(fs, protocol.SeverityBlock), "PVE-0201") {
 		t.Fatalf("an 8 GiB start with 5 GiB available: %+v", fs)
 	}
-	if n := NeedOf([]protocol.Change{startChange("7001")}, f.Guests); n.MemoryMiB != 8192 {
+	if n := NeedOf([]protocol.Change{startChange("7001")}, f.Guests, settings.DiskStorage); n.MemoryMiB != 8192 {
 		t.Fatalf("need %+v", n)
 	}
 }
@@ -246,7 +246,7 @@ func TestNeedCountsEachVMOnce(t *testing.T) {
 		{"a disk grown by 10 GiB", []protocol.Change{grow("7001", "20G")}, 0, 10, 0},
 		{"an unknown VM: at the asked size", []protocol.Change{resize("7999", "512")}, 512, 0, 0},
 	} {
-		n := NeedOf(c.changes, guests)
+		n := NeedOf(c.changes, guests, settings.DiskStorage)
 		if n.MemoryMiB != c.memory || n.DiskGiB != c.disk || n.Creates != c.creates {
 			t.Errorf("%s: %+v, want %d MiB, %d GiB, %d creates", c.name, n, c.memory, c.disk, c.creates)
 		}

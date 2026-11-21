@@ -144,11 +144,12 @@ func (k *vmKind) Missing(c *kit.Client, r protocol.Resource) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	vms, err := k.run.reader(c).list()
+	// Every guest's VMID is taken, a container's too: a VMID is one guest's in the whole cluster.
+	gs, err := k.run.reader(c).guests()
 	if err != nil {
 		return nil, err
 	}
-	st := State{FreeVMIDs: freeVMIDs(vms, c.Claimed, s.Node, s.VMIDMin, s.VMIDMax, false)}
+	st := State{FreeVMIDs: freeVMIDs(gs, c.Claimed, s.Node, s.VMIDMin, s.VMIDMax, false)}
 	if s.Image != "" {
 		if st.ImageUploaded, err = hasVolume(c, s.Node, s.ImageStorage, "import", VolumeName(s.Image, Images[s.Image])); err != nil {
 			return nil, err
@@ -357,8 +358,9 @@ func (*vmKind) Prepare(op protocol.Op, o protocol.Observed, desired *protocol.Re
 	return prepareVM(op, o, desired)
 }
 
-// freeVMIDs are up to 64 VMIDs of a range that no guest has and that no other plan is to create on
-// the node (Mamela's claims): from the bottom of the range (VMs) or from the top (templates).
+// freeVMIDs are up to 64 VMIDs of a range that no guest (a VM or a container) has and that no
+// other plan is to create on the node (Mamela's claims): from the bottom of the range (VMs) or from
+// the top (templates).
 func freeVMIDs(vms map[int64]resource, claimed []map[string]string, node string, min, max int64, fromTop bool) []int64 {
 	taken := map[int64]bool{}
 	for _, ids := range claimed {

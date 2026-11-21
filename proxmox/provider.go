@@ -20,7 +20,8 @@ import (
 //
 //   - observing: a declared VM's claim depends on its declaration (owned only with the declared
 //     tag; its seeds' storage among its IDs; adoptable only inside the declared pool, node and
-//     VMID range), and a VM is a node (kit reports no node): each kind's claim does it, after
+//     VMID range), so does a declared container's (adoptable only inside the declared boundary),
+//     and a VM or a container is a node (kit reports no node): each kind's claim does it, after
 //     kit's observation;
 //   - diffing: a declaration of a VM that exists and is not Mamela's gets no changes (the plan
 //     shows it as someone else's, and denies changing it) instead of failing the whole diff; and
@@ -32,6 +33,7 @@ type Provider struct {
 	run  *run
 	vm   *vmKind
 	tmpl *templateKind
+	lxc  *lxcKind
 }
 
 // Options tune a provider for tests: Poll is how long to wait between task status reads (default
@@ -46,11 +48,11 @@ func New() *Provider { return NewWith(Options{}) }
 // NewWith is the provider with options.
 func NewWith(o Options) *Provider {
 	r := &run{}
-	p := &Provider{run: r, vm: &vmKind{run: r}, tmpl: &templateKind{run: r}}
+	p := &Provider{run: r, vm: &vmKind{run: r}, tmpl: &templateKind{run: r}, lxc: &lxcKind{run: r}}
 	p.Provider = &kit.Provider{
 		Name: Name, Version: Version, API: API,
 		ObserveNeeds: append(atPool("VM.Audit", "Pool.Audit"), atStorage("imageStorage", "Datastore.Audit")...),
-		Kinds:        []kit.Kind{p.vm, p.tmpl},
+		Kinds:        []kit.Kind{p.vm, p.tmpl, p.lxc},
 		GuardCalls:   GuardCalls,
 		GuardFunc: func(c *kit.Client, in protocol.GuardParams) (protocol.GuardResult, error) {
 			return guard(c, p.Manifest(), in)
@@ -93,7 +95,7 @@ type claimer interface {
 func (p *Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.ObserveParams) (protocol.ObserveResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.run.obs = &reader{cfgs: map[int64]vmConfig{}}
+	p.run.obs = &reader{cfgs: map[int64]vmConfig{}, cts: map[int64]ctConfig{}}
 	defer func() { p.run.obs = nil }()
 	out, err := p.Provider.Observe(ctx, h, in)
 	if err != nil {
@@ -106,8 +108,11 @@ func (p *Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.Observe
 	for i := range out.Resources {
 		o := &out.Resources[i]
 		var k claimer = p.vm
-		if o.Kind == KindTemplate {
+		switch o.Kind {
+		case KindTemplate:
 			k = p.tmpl
+		case KindLXC:
+			k = p.lxc
 		}
 		if err := k.claim(o, declared[o.ID]); err != nil {
 			return out, fmt.Errorf("%s: %w", o.ID, err)

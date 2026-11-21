@@ -30,6 +30,82 @@
       "effect": "read"
     },
     {
+      "method": "PUT",
+      "path": "/nodes/{node}/lxc/{vmid}/config",
+      "effect": "change",
+      "form": [
+        "cores",
+        "description",
+        "digest",
+        "memory",
+        "onboot",
+        "swap",
+        "tags"
+      ],
+      "precondition": "digest",
+      "measures": [
+        {
+          "param": "cores",
+          "name": "cpu",
+          "format": "count"
+        },
+        {
+          "param": "memory",
+          "name": "memoryMiB",
+          "format": "count"
+        }
+      ],
+      "values": {
+        "onboot": [
+          "0",
+          "1"
+        ]
+      }
+    },
+    {
+      "method": "PUT",
+      "path": "/nodes/{node}/lxc/{vmid}/resize",
+      "effect": "change",
+      "form": [
+        "digest",
+        "disk",
+        "size"
+      ],
+      "precondition": "digest",
+      "measures": [
+        {
+          "param": "size",
+          "name": "diskGiB",
+          "format": "size"
+        }
+      ],
+      "values": {
+        "disk": [
+          "rootfs"
+        ]
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/lxc/{vmid}/status/reboot",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/lxc/{vmid}/status/shutdown",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/lxc/{vmid}/status/start",
+      "effect": "restart"
+    },
+    {
+      "method": "POST",
+      "path": "/nodes/{node}/lxc/{vmid}/status/stop",
+      "effect": "restart"
+    },
+    {
       "method": "POST",
       "path": "/nodes/{node}/qemu",
       "effect": "create",

@@ -11,6 +11,9 @@
 ## the template once, from the pinned image, and each VM from it in seconds; the template is deleted
 ## only by the explicit `delete-template`, once no VM is cloned from it.
 ##
+## A container (LXC) that a person made can be managed too: declare it by its VMID with
+## `Proxmox.lxc`, and adopt it (`adopt-lxc`). Mamela never creates or deletes a container.
+##
 ## The typed declarations of every kind, generated from the provider's manifest, are in
 ## `Proxmox.Kinds` (src/kinds.emel): `mamela import terraform` writes the VMs it imports with them.
 
@@ -25,6 +28,7 @@ pub const PROVIDER = "proxmox"
 ## The resource kinds.
 pub const KIND = "ProxmoxVM"
 pub const TEMPLATE_KIND = "ProxmoxTemplate"
+pub const LXC_KIND = "ProxmoxLXC"
 
 ## Where VMs go on the cluster: the Proxmox node, the pool the token may change, the storages for
 ## disks and for images and seeds, the bridge, the tag Mamela puts on them, and the VMIDs it may
@@ -121,4 +125,96 @@ fn declare(
 ## The VM as a node, for packages, services and k3s on it.
 pub fn node(vm: Vm) -> Mamela.Node {
   Mamela.Node(name: vm.name)
+}
+
+## Whether a container is kept running or stopped.
+pub enum Power {
+  Running
+  Stopped
+}
+
+## A container (LXC) that exists already on the site's node, made by a person: Mamela adopts it by
+## its `vmid` (inside the site's VMIDs and pool) and then manages only the values that are given
+## (`Some`); one that is `None` is never changed. `memory_mib` and `swap_mib` are in MiB,
+## `rootfs_gib` (its root filesystem) in GiB and only ever grown, `onboot` whether it starts when
+## the node boots, `power` whether it is kept running or stopped. `lxc_of` makes one that manages
+## nothing, to change with `Lxc(memory_mib: Some(1024), ..Proxmox.lxc_of("dns", 7005))`.
+pub type Lxc(
+  name: String,
+  vmid: Int,
+  cores: Option[Int],
+  memory_mib: Option[Int],
+  swap_mib: Option[Int],
+  rootfs_gib: Option[Int],
+  onboot: Option[Bool],
+  power: Option[Power],
+)
+
+## The container `name` with VMID `vmid`, none of whose values Mamela manages.
+pub fn lxc_of(name: String, vmid: Int) -> Lxc {
+  Lxc(
+    name:,
+    vmid:,
+    cores: None,
+    memory_mib: None,
+    swap_mib: None,
+    rootfs_gib: None,
+    onboot: None,
+    power: None,
+  )
+}
+
+fn power_text(p: Power) -> String {
+  p match {
+    Running -> "running"
+    Stopped -> "stopped"
+  }
+}
+
+fn some_int(key: String, v: Option[Int]) -> List[(String, Dynamic)] {
+  v match {
+    Some(n) -> [(key, int(n))]
+    None    -> []
+  }
+}
+
+## Declares the container on the site. Until a person adopts it (`mamela act --confirm <name>
+## adopt-lxc "ProxmoxLXC <name>" <pome-dir>`), the plan shows it as one to adopt, with what would
+## change, and changes nothing. Adopting it appends Mamela's marker line to its description and the
+## site's tag to its tags, and changes nothing else. Then Mamela makes its given values so: cores,
+## memory and swap at once (without restarting it), its root filesystem grown in place, and it is
+## started or shut down as declared. Mamela never creates, moves or deletes a container; restarting
+## and stopping it are explicit operations (`reboot-lxc`, `stop-lxc`).
+pub fn lxc(graph: Mamela.Graph, site: Site, ct: Lxc) -> Mamela.Graph {
+  spec = List.flatten(
+    [
+      [
+        ("node", Text(site.node)),
+        ("pool", Text(site.pool)),
+        ("tag", Text(site.tag)),
+        ("vmidMin", int(site.vmid_min)),
+        ("vmidMax", int(site.vmid_max)),
+        ("vmid", int(ct.vmid)),
+      ],
+      some_int("cores", ct.cores),
+      some_int("memoryMib", ct.memory_mib),
+      some_int("swapMib", ct.swap_mib),
+      some_int("rootfsGib", ct.rootfs_gib),
+      ct.onboot match {
+        Some(b) -> [("onboot", Dynamic.Bool(b))]
+        None    -> []
+      },
+      ct.power match {
+        Some(p) -> [("power", Text(power_text(p)))]
+        None    -> []
+      },
+    ],
+  )
+  Mamela.provided(graph, PROVIDER, LXC_KIND, ct.name, spec)
+}
+
+## The container as a node, to declare packages and services on once mamelet runs in it (Mamela
+## does not install mamelet in a container it adopts).
+pub fn lxc_node(ct: Lxc) -> Mamela.Node {
+  Mamela.Node(name: ct.name)
 }
