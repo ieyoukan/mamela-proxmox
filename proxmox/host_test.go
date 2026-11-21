@@ -21,6 +21,14 @@ import (
 // host/request with the fake API (without the host's checks: the conformance suite has them).
 func rpc(t *testing.T, api http.Handler, method string, params, out any) {
 	t.Helper()
+	if err := call(t, api, method, params, out); err != nil {
+		t.Fatalf("%s: %v", method, err)
+	}
+}
+
+// call is rpc, and returns the provider's error.
+func call(t *testing.T, api http.Handler, method string, params, out any) error {
+	t.Helper()
 	toProvider, fromHost := io.Pipe()
 	fromProvider, toHost := io.Pipe()
 	done := make(chan error, 1)
@@ -59,15 +67,16 @@ func rpc(t *testing.T, api http.Handler, method string, params, out any) {
 		case m.Method != "":
 			write(protocol.Message{ID: m.ID, Error: &protocol.Error{Code: protocol.CodeRefused, Message: "not in this test"}})
 		case m.Error != nil:
-			t.Fatalf("%s: %v", method, m.Error)
+			return m.Error
 		default:
 			if err := json.Unmarshal(m.Result, out); err != nil {
 				t.Fatal(err)
 			}
-			return
+			return nil
 		}
 	}
 	t.Fatalf("%s: no answer", method)
+	return nil
 }
 
 func observe(t *testing.T, api http.Handler, in protocol.ObserveParams) map[string]protocol.Observed {

@@ -18,6 +18,10 @@
 // explicit operations (explicit.go): a person asks for each by name. A VM that Terraform made can
 // be imported and taken over (imports.go).
 //
+// Kind ProxmoxLXC (lxc.go), a node kind too, is a container a person made by hand: Mamela manages
+// the values its declaration gives once a person adopts it (adopt-lxc), and never creates, moves
+// or deletes one.
+//
 // Its guard (guard.go) checks the cluster before and after every apply: the boundary of pool, VMID
 // range and node; the operating token's permissions; the room on the node; and that no guest
 // outside the boundary changed.
@@ -40,7 +44,7 @@ import (
 // Name and Version are the provider's, as its manifest and Pome name them.
 const (
 	Name    = "proxmox"
-	Version = "0.2.0"
+	Version = "0.3.0"
 	// API is the API it talks to (its catalog: pome/catalogs/proxmox.json, "pome:proxmox").
 	API = "proxmox"
 )
@@ -224,13 +228,14 @@ func NetworkString(n protocol.Network) string {
 }
 
 type resource struct {
-	VMID   int64  `json:"vmid"`
-	Name   string `json:"name"`
-	Node   string `json:"node"`
-	Pool   string `json:"pool"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
-	Uptime int64  `json:"uptime"`
+	VMID     int64  `json:"vmid"`
+	Name     string `json:"name"`
+	Node     string `json:"node"`
+	Pool     string `json:"pool"`
+	Type     string `json:"type"` // qemu or lxc
+	Status   string `json:"status"`
+	Uptime   int64  `json:"uptime"`
+	Template int    `json:"template"`
 }
 
 // Ownership is the provider's claim on a VM that carries its marker, in the pool and the VMID
@@ -298,23 +303,46 @@ type vmConfig struct {
 	Net0        string
 }
 
+// configFields reads a guest's configuration (Proxmox's {"key": value}): its values as text, and
+// as numbers (which may come as strings).
+type configFields map[string]jsontext.Value
+
+func readConfig(b []byte) (configFields, error) {
+	var raw configFields
+	err := json.Unmarshal(b, &raw)
+	return raw, err
+}
+
+func (raw configFields) text(k string) string {
+	var s string
+	if json.Unmarshal(raw[k], &s) != nil {
+		s = strings.Trim(string(raw[k]), `"`)
+	}
+	return s
+}
+
+func (raw configFields) num(k string) int64 {
+	n, _ := strconv.ParseInt(raw.text(k), 10, 64)
+	return n
+}
+
+func (raw configFields) has(k string) bool {
+	_, ok := raw[k]
+	return ok
+}
+
+// splitTags reads Proxmox's tags ("a;b", also with commas or spaces).
+func splitTags(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ';' || r == ',' || r == ' ' })
+}
+
 // UnmarshalJSON reads what it needs of a VM's configuration: numbers may come as strings.
 func (c *vmConfig) UnmarshalJSON(b []byte) error {
-	var raw map[string]jsontext.Value
-	if err := json.Unmarshal(b, &raw); err != nil {
+	raw, err := readConfig(b)
+	if err != nil {
 		return err
 	}
-	text := func(k string) string {
-		var s string
-		if json.Unmarshal(raw[k], &s) != nil {
-			s = strings.Trim(string(raw[k]), `"`)
-		}
-		return s
-	}
-	num := func(k string) int64 {
-		n, _ := strconv.ParseInt(text(k), 10, 64)
-		return n
-	}
+	text, num := raw.text, raw.num
 	c.Name, c.Digest, c.Description = text("name"), text("digest"), text("description")
 	c.Cores, c.Sockets, c.Memory = num("cores"), num("sockets"), num("memory")
 	if c.Cores == 0 {
@@ -327,9 +355,7 @@ func (c *vmConfig) UnmarshalJSON(b []byte) error {
 	c.SCSI0, c.IDE2, c.Net0 = text("scsi0"), text("ide2"), text("net0")
 	c.Template = text("template") == "1"
 
-	for _, t := range strings.FieldsFunc(text("tags"), func(r rune) bool { return r == ';' || r == ',' || r == ' ' }) {
-		c.Tags = append(c.Tags, t)
-	}
+	c.Tags = splitTags(text("tags"))
 	return nil
 }
 
@@ -420,19 +446,37 @@ func config(c *kit.Client, node string, vmid int64) (vmConfig, error) {
 	return cfg, err
 }
 
-// list is every VM (qemu) the token sees, by VMID.
-func list(c *kit.Client) (map[int64]resource, error) {
+// guests is every guest the token sees, VMs (qemu) and containers (lxc), by VMID: a VMID is one
+// guest's in the whole cluster, whatever it is.
+func guests(c *kit.Client) (map[int64]resource, error) {
 	var rs []resource
 	if err := get(c, listVMs, nil, map[string][]string{"type": {"vm"}}, &rs); err != nil {
 		return nil, err
 	}
 	out := map[int64]resource{}
 	for _, r := range rs {
-		if r.Type == "qemu" {
+		if r.Type == "qemu" || r.Type == "lxc" {
 			out[r.VMID] = r
 		}
 	}
 	return out, nil
+}
+
+// list is every VM (qemu) the token sees, by VMID: never a container.
+func list(c *kit.Client) (map[int64]resource, error) {
+	gs, err := guests(c)
+	return ofType(gs, "qemu"), err
+}
+
+// ofType are the guests of a type (qemu or lxc).
+func ofType(gs map[int64]resource, typ string) map[int64]resource {
+	out := map[int64]resource{}
+	for id, g := range gs {
+		if g.Type == typ {
+			out[id] = g
+		}
+	}
+	return out
 }
 
 func hasVolume(c *kit.Client, node, storage, content, file string) (bool, error) {
@@ -460,23 +504,48 @@ func volumes(c *kit.Client, node, storage, content string) ([]string, error) {
 	return out, nil
 }
 
-// reader reads VMs and their configurations: once per observation (the kinds' lists, what is
+// reader reads guests and their configurations: once per observation (the kinds' lists, what is
 // missing, what is found), and afresh otherwise (applying, looking up).
 type reader struct {
 	c    *kit.Client
-	vms  map[int64]resource
-	cfgs map[int64]vmConfig
+	all  map[int64]resource // every guest, VMs and containers
+	cfgs map[int64]vmConfig // VMs'
+	cts  map[int64]ctConfig // containers'
 }
 
-func (r *reader) list() (map[int64]resource, error) {
-	if r.vms != nil {
-		return r.vms, nil
+// guests is every guest (VMs and containers).
+func (r *reader) guests() (map[int64]resource, error) {
+	if r.all != nil {
+		return r.all, nil
 	}
-	vms, err := list(r.c)
+	gs, err := guests(r.c)
 	if err == nil && r.cfgs != nil {
-		r.vms = vms // an observation's reader keeps what it read
+		r.all = gs // an observation's reader keeps what it read
 	}
-	return vms, err
+	return gs, err
+}
+
+// list is every VM (qemu), never a container.
+func (r *reader) list() (map[int64]resource, error) {
+	gs, err := r.guests()
+	return ofType(gs, "qemu"), err
+}
+
+// containers is every container (lxc), never a VM.
+func (r *reader) containers() (map[int64]resource, error) {
+	gs, err := r.guests()
+	return ofType(gs, "lxc"), err
+}
+
+func (r *reader) ct(node string, vmid int64) (ctConfig, error) {
+	if cfg, ok := r.cts[vmid]; ok {
+		return cfg, nil
+	}
+	cfg, err := containerConfig(r.c, node, vmid)
+	if err == nil && r.cts != nil {
+		r.cts[vmid] = cfg
+	}
+	return cfg, err
 }
 
 func (r *reader) config(node string, vmid int64) (vmConfig, error) {

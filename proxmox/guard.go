@@ -84,10 +84,13 @@ type Guest struct {
 	Pool         string `json:"pool,omitempty"`
 	Uptime       int64  `json:"uptime,omitempty"`
 	ConfigDigest string `json:"configDigest,omitempty"` // empty when its node is offline
-	// What a VM's configuration gives it, to count what a start or a resize adds (0 when unknown).
+	// What a guest's configuration gives it, to count what a start or a resize adds (0 when
+	// unknown): a VM's memory and disk (scsi0), a container's memory and root filesystem.
 	MemoryMiB int64  `json:"memoryMiB,omitempty"`
 	DiskGiB   int64  `json:"diskGiB,omitempty"`
 	Network   string `json:"network,omitempty"` // network recorded in the provider ownership marker
+	// DiskStorage is the storage of a container's root filesystem.
+	DiskStorage string `json:"diskStorage,omitempty"`
 }
 
 // Facts are what the guard decides from. Gathering is apart from checking, so that the checks are
@@ -111,11 +114,10 @@ var (
 	storageStatus = protocol.Call{Method: "GET", Path: "/nodes/{node}/storage/{storage}/status"}
 	storages      = protocol.Call{Method: "GET", Path: "/nodes/{node}/storage", Query: []string{"content"}}
 	permissions   = protocol.Call{Method: "GET", Path: "/access/permissions", Query: []string{"userid", "path"}}
-	lxcConfig     = protocol.Call{Method: "GET", Path: "/nodes/{node}/lxc/{vmid}/config"}
 )
 
 // GuardCalls are the reads the guard makes.
-var GuardCalls = []protocol.Call{clusterStatus, listVMs, getConfig, lxcConfig, nodeStatus, storageStatus, storages, permissions}
+var GuardCalls = []protocol.Call{clusterStatus, listVMs, getConfig, getLXCConfig, nodeStatus, storageStatus, storages, permissions}
 
 // Gather reads the facts through the host (the audit token).
 func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
@@ -165,23 +167,24 @@ func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
 			continue
 		}
 		g := Guest{VMID: r.VMID, Type: r.Type, Node: r.Node, Name: r.Name, Status: r.Status, Pool: r.Pool, Uptime: r.Uptime}
-		if online[g.Node] {
-			read := getConfig
-			if g.Type == "lxc" {
-				read = lxcConfig
-			}
-			var cfg vmConfig
-			if err := get(c, read, ids(g.Node, g.VMID), nil, &cfg); err != nil {
+		switch {
+		case !online[g.Node]:
+		case g.Type == "lxc":
+			var cfg ctConfig
+			if err := get(c, getLXCConfig, ids(g.Node, g.VMID), nil, &cfg); err != nil {
 				return nil, err
 			}
-			g.ConfigDigest = cfg.Digest
-			if g.Type == "qemu" {
-				g.MemoryMiB, g.DiskGiB = cfg.Memory, cfg.DiskGiB
-				if m, ok := markerOf(Kind, cfg.Description); ok {
-					g.Network = m.Network
-				} else if m, ok := parseOldMarker(cfg.Description); ok {
-					g.Network = m.Network
-				}
+			g.ConfigDigest, g.MemoryMiB, g.DiskGiB, g.DiskStorage = cfg.Digest, cfg.MemoryMiB, cfg.RootfsGiB, diskStorage(cfg.Rootfs)
+		default:
+			var cfg vmConfig
+			if err := get(c, getConfig, ids(g.Node, g.VMID), nil, &cfg); err != nil {
+				return nil, err
+			}
+			g.ConfigDigest, g.MemoryMiB, g.DiskGiB = cfg.Digest, cfg.Memory, cfg.DiskGiB
+			if m, ok := markerOf(Kind, cfg.Description); ok {
+				g.Network = m.Network
+			} else if m, ok := parseOldMarker(cfg.Description); ok {
+				g.Network = m.Network
 			}
 		}
 		f.Guests = append(f.Guests, g)
@@ -226,22 +229,25 @@ func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
 	return f, nil
 }
 
-// Need is what the changes of one apply need of the node and the storage, VM by VM:
+// Need is what the changes of one apply need of the node and the storage, guest by guest (a VM or
+// a container):
 //
 //   - a VM created and started: its memory and disk, once;
-//   - a stopped VM started: its memory (its new memory if it is resized too);
-//   - a running VM resized: what its memory grows by;
-//   - a disk grown: what it grows by.
+//   - a stopped guest started: its memory (its new memory if it is resized too);
+//   - a running guest resized: what its memory grows by;
+//   - a disk grown: what it grows by (a container's root filesystem only when it is on the disk
+//     storage: one elsewhere is outside the boundary, PVE-0304).
 //
-// A VM the guard cannot read is counted at the size the change asks for (an upper bound).
+// A guest the guard cannot read is counted at the size the change asks for (an upper bound).
 type Need struct {
 	Creates   int
 	MemoryMiB int64
 	DiskGiB   int64
 }
 
-// NeedOf sums the changes, with what the guests' configurations say now.
-func NeedOf(changes []protocol.Change, guests []Guest) Need {
+// NeedOf sums the changes, with what the guests' configurations say now; diskStorage is the
+// storage whose room PVE-0202 checks.
+func NeedOf(changes []protocol.Change, guests []Guest, diskStorage string) Need {
 	type vm struct {
 		created, started bool
 		memory, disk     int64 // asked by the changes (0: not changed)
@@ -259,13 +265,13 @@ func NeedOf(changes []protocol.Change, guests []Guest) Need {
 		v.created = v.created || c.Op == OpCreate || c.Op == OpCreateTemplate
 		for _, r := range c.Requests {
 			switch r.Path {
-			case startVM.Path:
+			case startVM.Path, startLXC.Path:
 				v.started = true
-			case createVM.Path, setConfig.Path:
+			case createVM.Path, setConfig.Path, setLXCConfig.Path:
 				if x := r.Params["memory"]; len(x) == 1 {
 					v.memory, _ = strconv.ParseInt(x[0], 10, 64)
 				}
-			case resizeDisk.Path:
+			case resizeDisk.Path, resizeLXC.Path:
 				if x := r.Params["size"]; len(x) == 1 {
 					v.disk, _ = strconv.ParseInt(strings.TrimSuffix(x[0], "G"), 10, 64)
 				}
@@ -274,7 +280,7 @@ func NeedOf(changes []protocol.Change, guests []Guest) Need {
 	}
 	now := map[string]Guest{}
 	for _, g := range guests {
-		if g.Type == "qemu" {
+		if g.Type == "qemu" || g.Type == "lxc" {
 			now[strconv.FormatInt(g.VMID, 10)] = g
 		}
 	}
@@ -304,7 +310,7 @@ func NeedOf(changes []protocol.Change, guests []Guest) Need {
 		case running && v.memory > g.MemoryMiB:
 			n.MemoryMiB += v.memory - g.MemoryMiB
 		}
-		if v.disk > g.DiskGiB {
+		if v.disk > g.DiskGiB && (g.Type != "lxc" || g.DiskStorage == diskStorage) {
 			n.DiskGiB += v.disk - g.DiskGiB
 		}
 	}
@@ -354,7 +360,7 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	}
 
 	// Room on the node and the storage.
-	n := NeedOf(changes, f.Guests)
+	n := NeedOf(changes, f.Guests, s.DiskStorage)
 	left := (f.MemAvailable >> 20) - n.MemoryMiB
 	if left < s.MinHostMemAvailableMiB {
 		add("PVE-0201", block, "only %d MiB would remain available on %s after the changes' %d MiB (minimum %d MiB): free memory or lower min_host_mem_available_mib",
@@ -398,7 +404,7 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	}
 	outside := 0
 	for _, c := range changes {
-		for _, why := range Outside(s, c) {
+		for _, why := range Outside(s, c, f.Guests) {
 			add("PVE-0304", block, "%s %s: %s; the declaration (Proxmox.Site) and [provider.proxmox.guard] must agree", c.Op, c.Resource, why)
 			outside++
 		}
@@ -411,8 +417,10 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 }
 
 // Outside lists how a change leaves the boundary the operator set: another node, a VMID out of the
-// range, another pool, storage, bridge or tag.
-func Outside(s GuardSettings, c protocol.Change) []string {
+// range, another pool, storage, bridge or tag. A container's change is checked against the guest
+// it names (guests, as the audit token sees them): a container in the pool, whose root filesystem
+// is on the disk storage, keeping the tag.
+func Outside(s GuardSettings, c protocol.Change, guests []Guest) []string {
 	var out []string
 	if c.IDs["node"] != s.Node {
 		out = append(out, fmt.Sprintf("node %q is not %s", c.IDs["node"], s.Node))
@@ -464,6 +472,46 @@ func Outside(s GuardSettings, c protocol.Change) []string {
 			}
 			if t, err := strconv.ParseInt(c.IDs["template"], 10, 64); err != nil || !s.inRange(t) {
 				out = append(out, fmt.Sprintf("template %q is not in %d..%d", c.IDs["template"], s.VMIDMin, s.VMIDMax))
+			}
+		}
+	}
+	if c.Kind == KindLXC {
+		out = append(out, outsideContainer(s, c, guests)...)
+	}
+	return out
+}
+
+// outsideContainer lists how a container's change leaves the boundary: the guest it names is not a
+// container in the pool on the node, its root filesystem is not on the disk storage, or the tags
+// it sets lack the tag.
+func outsideContainer(s GuardSettings, c protocol.Change, guests []Guest) []string {
+	var out []string
+	i := slices.IndexFunc(guests, func(g Guest) bool { return strconv.FormatInt(g.VMID, 10) == c.IDs["vmid"] })
+	var g Guest
+	switch {
+	case i < 0:
+		out = append(out, fmt.Sprintf("no guest has VMID %q", c.IDs["vmid"]))
+	case guests[i].Type != "lxc":
+		g = guests[i]
+		out = append(out, fmt.Sprintf("guest %d (%s) is a VM (%s), not a container", g.VMID, g.Name, g.Type))
+	default:
+		g = guests[i]
+		if g.Pool != s.Pool {
+			out = append(out, fmt.Sprintf("container %d (%s) is in pool %q, not %s", g.VMID, g.Name, g.Pool, s.Pool))
+		}
+		if g.Node != c.IDs["node"] {
+			out = append(out, fmt.Sprintf("container %d (%s) is on node %s, not %s", g.VMID, g.Name, g.Node, c.IDs["node"]))
+		}
+	}
+	for _, r := range c.Requests {
+		switch r.Path {
+		case resizeLXC.Path:
+			if g.Type == "lxc" && g.DiskStorage != s.DiskStorage {
+				out = append(out, fmt.Sprintf("the root filesystem of container %d is on storage %q, not %s", g.VMID, g.DiskStorage, s.DiskStorage))
+			}
+		case setLXCConfig.Path:
+			if v, ok := r.Params["tags"]; ok && (len(v) != 1 || !slices.Contains(splitTags(v[0]), s.Tag)) {
+				out = append(out, fmt.Sprintf("tags %q do not keep %s", strings.Join(v, ","), s.Tag))
 			}
 		}
 	}

@@ -213,27 +213,7 @@ func TestImportTerraformCommand(t *testing.T) {
 	tf := fakepve.New().AddTerraformVMs()
 	dir := t.TempDir()
 	decl := filepath.Join(dir, "decl")
-	repo, _ := filepath.Abs("..")
-	lock, _ := os.ReadFile("../examples/homelab/Pome.lock")
-	files := map[string]string{
-		"decl/Pome.toml": `[pome]
-name = "example.com/decl"
-version = "0.1.0"
-emela = "0.27.0"
-
-[build]
-target = "wasm"
-
-[dependencies]
-"github.com/ieyoukan/mamela/pome/mamela" = "v0.3.0"
-"github.com/ieyoukan/mamela-proxmox/pome" = "v0.1.0"
-
-[replace]
-"github.com/ieyoukan/mamela/pome/mamela" = { path = "` + filepath.Join(repo, "../mamela/pome/mamela") + `" }
-"github.com/ieyoukan/mamela-proxmox/pome" = { path = "` + filepath.Join(repo, "pome") + `" }
-`,
-		"decl/Pome.lock": string(lock),
-		"decl/src/main.emel": `import Std.Console.{SystemConsole}
+	writeDeclaration(t, decl, `import Std.Console.{SystemConsole}
 import Mamela
 
 fn main() {
@@ -241,7 +221,8 @@ fn main() {
     Mamela.empty() |> Mamela.print
   }
 }
-`,
+`)
+	files := map[string]string{
 		"state.json": string(tf.State),
 		"mamela.providers.toml": `[provider.proxmox]
 api_url = "https://pve.example:8006/api2/json"
@@ -273,16 +254,7 @@ max_storage_used_percent = 80
 			t.Fatal(err)
 		}
 	}
-	mamela := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("go", append([]string{"tool", "mamela"}, args...)...)
-		cmd.Env = append(os.Environ(), "GOWORK=off")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("mamela %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-		return string(out)
-	}
+	mamela := func(args ...string) string { t.Helper(); return runMamela(t, args...) }
 	out := mamela("import", "terraform", "--state", filepath.Join(dir, "state.json"), "--db", filepath.Join(dir, "state.db"), "--by", "tester",
 		"--providers", filepath.Join(dir, "mamela.providers.toml"), decl)
 	for _, want := range []string{
@@ -317,5 +289,139 @@ fn main() {
 		if !strings.Contains(graph, want) {
 			t.Errorf("the graph has no %s:\n%s", want, graph)
 		}
+	}
+}
+
+// writeDeclaration writes a declaration's Pome in dir: one that uses this repository's Pome and
+// Mamela's (a checkout of github.com/ieyoukan/mamela next to this one), with main.emel as its
+// program.
+func writeDeclaration(t *testing.T, dir, main string) {
+	t.Helper()
+	repo, _ := filepath.Abs("..")
+	lock, _ := os.ReadFile("../examples/homelab/Pome.lock")
+	for name, data := range map[string]string{
+		"Pome.toml": `[pome]
+name = "example.com/decl"
+version = "0.1.0"
+emela = "0.27.0"
+
+[build]
+target = "wasm"
+
+[dependencies]
+"github.com/ieyoukan/mamela/pome/mamela" = "v0.3.0"
+"github.com/ieyoukan/mamela-proxmox/pome" = "v0.1.0"
+
+[replace]
+"github.com/ieyoukan/mamela/pome/mamela" = { path = "` + filepath.Join(repo, "../mamela/pome/mamela") + `" }
+"github.com/ieyoukan/mamela-proxmox/pome" = { path = "` + filepath.Join(repo, "pome") + `" }
+`,
+		"Pome.lock":     string(lock),
+		"src/main.emel": main,
+	} {
+		p := filepath.Join(dir, name)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// runMamela runs the mamela command of the Mamela this module requires.
+func runMamela(t *testing.T, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("go", append([]string{"tool", "mamela"}, args...)...)
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("mamela %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// A declaration of containers with the Pome's Proxmox.lxc evaluates into their specs: the site's
+// boundary, the VMID, and only the values given; and the generated Proxmox.Kinds writes the same.
+func TestLXCDeclarationEvaluates(t *testing.T) {
+	if os.Getenv("MAMELA_TOOLCHAIN_DIR") == "" {
+		t.Skip("MAMELA_TOOLCHAIN_DIR: the toolchain of Mamela")
+	}
+	decl := filepath.Join(t.TempDir(), "decl")
+	writeDeclaration(t, decl, `import Std.Console.{SystemConsole}
+import Mamela
+import Proxmox.{Lxc, Site, Stopped}
+import Proxmox.Kinds.{ProxmoxLxc, Running}
+
+fn main() {
+  site = Site(
+    node: "pve1",
+    pool: "mamela",
+    disk_storage: "local-lvm",
+    image_storage: "local",
+    bridge: "vmbr0",
+    tag: "mamela",
+    vmid_min: 7000,
+    vmid_max: 7099,
+  )
+  dns = Lxc(memory_mib: Some(1024), rootfs_gib: Some(8), onboot: Some(True), ..Proxmox.lxc_of("dns", 7005))
+  batch = Lxc(power: Some(Stopped), ..Proxmox.lxc_of("batch", 7006))
+  with SystemConsole {
+    Mamela.empty()
+      |> Proxmox.lxc(site, dns)
+      |> Proxmox.lxc(site, batch)
+      |> Proxmox.lxc(site, Proxmox.lxc_of("bare", 7007))
+      |> Kinds.proxmox_lxc(
+        ProxmoxLxc(
+          name: "typed",
+          node: "pve1",
+          pool: "mamela",
+          tag: "mamela",
+          vmid_min: 7000,
+          vmid_max: 7099,
+          vmid: 7008,
+          cores: Some(2),
+          memory_mib: None,
+          swap_mib: Some(0),
+          rootfs_gib: None,
+          onboot: None,
+          power: Some(Running),
+        ),
+      )
+      |> Mamela.package(Proxmox.lxc_node(dns), "nginx")
+      |> Mamela.print
+  }
+}
+`)
+	graph := runMamela(t, "eval", "-json", decl)
+	var g struct {
+		Resources []struct {
+			Kind     string         `json:"kind"`
+			Name     string         `json:"name"`
+			Provider string         `json:"provider"`
+			Spec     jsontext.Value `json:"spec"`
+		} `json:"resources"`
+	}
+	start := strings.Index(graph, "{")
+	if start < 0 || json.Unmarshal([]byte(graph[start:]), &g) != nil {
+		t.Fatalf("not a graph:\n%s", graph)
+	}
+	const site = `"node":"pve1","pool":"mamela","tag":"mamela","vmidMin":7000,"vmidMax":7099`
+	want := map[string]string{
+		"dns":   `{` + site + `,"vmid":7005,"memoryMib":1024,"rootfsGib":8,"onboot":true}`,
+		"batch": `{` + site + `,"vmid":7006,"power":"stopped"}`,
+		"bare":  `{` + site + `,"vmid":7007}`,
+		"typed": `{` + site + `,"vmid":7008,"cores":2,"swapMib":0,"power":"running"}`,
+	}
+	n := 0
+	for _, r := range g.Resources {
+		if r.Kind != "ProxmoxLXC" {
+			continue
+		}
+		n++
+		if r.Provider != "proxmox" || canonical(r.Spec) != canonical([]byte(want[r.Name])) {
+			t.Errorf("%s: %s %s, want %s", r.Name, r.Provider, r.Spec, want[r.Name])
+		}
+	}
+	if n != len(want) || !strings.Contains(graph, "nginx") {
+		t.Errorf("the graph:\n%s", graph)
 	}
 }

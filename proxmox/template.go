@@ -218,11 +218,11 @@ func (k *templateKind) Missing(c *kit.Client, r protocol.Resource) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	vms, err := k.run.reader(c).list()
+	gs, err := k.run.reader(c).guests() // a container's VMID is taken too
 	if err != nil {
 		return nil, err
 	}
-	st := TemplateState{FreeVMIDs: freeVMIDs(vms, c.Claimed, s.Node, s.VMIDMin, s.VMIDMax, true)}
+	st := TemplateState{FreeVMIDs: freeVMIDs(gs, c.Claimed, s.Node, s.VMIDMin, s.VMIDMax, true)}
 	if st.ImageUploaded, err = hasVolume(c, s.Node, s.ImageStorage, "import", VolumeName(s.Image, Images[s.Image])); err != nil {
 		return nil, err
 	}

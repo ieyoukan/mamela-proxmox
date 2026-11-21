@@ -10,8 +10,10 @@ import "github.com/ieyoukan/mamela/provider/protocol"
 // Verified against Proxmox VE 9.2 (pve-manager 9.2.26): the API schema's "permissions" and the
 // checks inside the handlers (PVE/API2/Qemu.pm create_vm, check_storage_access,
 // check_vm_modify_config_perm, check_vm_create_serial_perm, check_bridge_access; PVE/Storage.pm
-// check_volume_access; PVE/GuestHelpers.pm assert_tag_permissions; PVE/API2/Cluster.pm resources).
-// Moved here from Mamela's internal/proxmox (ADR 0006 of Mamela).
+// check_volume_access; PVE/GuestHelpers.pm assert_tag_permissions; PVE/API2/Cluster.pm resources;
+// for containers, PVE/LXC.pm check_ct_modify_config_perm and PVE/API2/LXC.pm resize_vm, which
+// checks Datastore.AllocateSpace on the volume's storage). Moved here from Mamela's
+// internal/proxmox (ADR 0006 of Mamela).
 
 // Where a privilege is checked, as a manifest target's ref. A VM's privileges (/vms/<vmid>) come
 // from its pool's ACL.
@@ -55,6 +57,15 @@ var Catalog = map[string][]Privilege{
 	"POST /nodes/{node}/qemu/{vmid}/template":        {at(AtPool, "convert a VM to a template", "VM.Allocate")},
 	"POST /nodes/{node}/qemu/{template}/clone": {at(AtPool, "clone the template (in the pool)", "VM.Clone"),
 		at(AtPool, "make the clone in the pool", "VM.Allocate"), at(AtDiskStorage, "the clone's disk", "Datastore.AllocateSpace")},
+	// Containers (adopted, never created).
+	"GET /nodes/{node}/lxc/{vmid}/config": {at(AtPool, "read a container's configuration and marker", "VM.Audit")},
+	"PUT /nodes/{node}/lxc/{vmid}/config": nil, // each parameter's (LXCConfigParams)
+	"PUT /nodes/{node}/lxc/{vmid}/resize": {at(AtPool, "grow a container's root filesystem", "VM.Config.Disk"),
+		at(AtDiskStorage, "grow a volume on the disk storage", "Datastore.AllocateSpace")},
+	"POST /nodes/{node}/lxc/{vmid}/status/start":    {at(AtPool, "start a container", "VM.PowerMgmt")},
+	"POST /nodes/{node}/lxc/{vmid}/status/shutdown": {at(AtPool, "shut down a container declared stopped", "VM.PowerMgmt")},
+	"POST /nodes/{node}/lxc/{vmid}/status/reboot":   {at(AtPool, "restart a container", "VM.PowerMgmt")},
+	"POST /nodes/{node}/lxc/{vmid}/status/stop":     {at(AtPool, "stop a container", "VM.PowerMgmt")},
 }
 
 // CreateParams are the privileges of each parameter of POST /nodes/{node}/qemu, checked with the
@@ -90,6 +101,18 @@ var ConfigParams = map[string][]Privilege{
 	"ide2":        {at(AtPool, "attach a clone's seed", "VM.Config.CDROM"), at(AtImageStorage, "the seed ISO (check_volume_access)", "Datastore.Audit", "Datastore.AllocateSpace")},
 }
 
+// LXCConfigParams are the privileges of each parameter of PUT /nodes/{node}/lxc/{vmid}/config
+// (check_ct_modify_config_perm).
+var LXCConfigParams = map[string][]Privilege{
+	"digest":      nil,
+	"description": {at(AtPool, "append the marker (adopt-lxc)", "VM.Config.Options")},
+	"tags":        {at(AtPool, "add the tag (assert_tag_permissions)", "VM.Config.Options")},
+	"onboot":      {at(AtPool, "start at boot", "VM.Config.Options")},
+	"cores":       {at(AtPool, "change the cores", "VM.Config.CPU")},
+	"memory":      {at(AtPool, "change the memory", "VM.Config.Memory")},
+	"swap":        {at(AtPool, "change the swap", "VM.Config.Memory")},
+}
+
 // PrivilegesOf is every privilege a call needs, with the parameters it may send. ok is false for a
 // call or parameter the catalog does not know.
 func PrivilegesOf(c protocol.Call) (out []Privilege, ok bool) {
@@ -104,6 +127,8 @@ func PrivilegesOf(c protocol.Call) (out []Privilege, ok bool) {
 		params = CreateParams
 	case "PUT /nodes/{node}/qemu/{vmid}/config":
 		params = ConfigParams
+	case "PUT /nodes/{node}/lxc/{vmid}/config":
+		params = LXCConfigParams
 	default:
 		return out, true
 	}
