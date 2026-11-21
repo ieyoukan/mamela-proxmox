@@ -331,7 +331,8 @@ func TestLXCChanges(t *testing.T) {
 	}
 	cs := diffLXC(t, `"cores":2,"rootfsGib":8`, ownedLXC(had))
 	if r := cs[0].Requests[0]; r.Path != resizeLXC.Path || !sameParams(r.Params, map[string][]string{"disk": {"rootfs"}, "size": {"8G"}, "digest": {"d1"}}) ||
-		cs[0].Precondition != "d1" || !strings.Contains(strings.Join(cs[0].Reasons, "; "), "next plan") {
+		cs[0].Precondition != "d1" || !strings.Contains(strings.Join(cs[0].Reasons, "; "), "then, in the next plan") ||
+		!strings.Contains(strings.Join(cs[0].Reasons, "; "), "cores 1 -> 2") {
 		t.Errorf("grow: %+v", cs[0])
 	}
 	cs = diffLXC(t, `"cores":2,"memoryMib":256,"onboot":true`, ownedLXC(had))

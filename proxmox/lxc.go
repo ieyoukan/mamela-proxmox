@@ -541,7 +541,15 @@ func lxcChanges(r protocol.Resource, s LXCSpec, o protocol.Observed, st LXCState
 	if s.RootfsGib != nil && *s.RootfsGib > st.RootfsGiB {
 		reasons := []string{fmt.Sprintf("root filesystem %d -> %d GiB, grown in place (a running container keeps running)", st.RootfsGiB, *s.RootfsGib)}
 		if configure != nil && !preview {
-			reasons = append(reasons, "the rest of its configuration changes in the next plan (each change is based on the configuration it was planned on)")
+			// The rest is shown too (an observe-only container's plan shows every difference), though
+			// it is the next plan's change: each change is based on the configuration it was planned on.
+			var next []string
+			for _, w := range configure.Reasons {
+				if !strings.HasPrefix(w, "Proxmox applies") {
+					next = append(next, w)
+				}
+			}
+			reasons = append(reasons, "then, in the next plan (each change is based on the configuration it was planned on): "+strings.Join(next, "; "))
 		}
 		grow = &protocol.Change{Resource: r.ID, Kind: KindLXC, Op: OpGrowLXC, IDs: id, Precondition: o.Version, Reasons: reasons,
 			Requests: []protocol.Approved{req(resizeLXC, map[string][]string{"disk": {"rootfs"}, "size": {fmt.Sprintf("%dG", *s.RootfsGib)},
