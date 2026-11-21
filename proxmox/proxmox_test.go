@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -35,6 +36,22 @@ func clone(name, rest string) protocol.Resource {
 	r := vm(name, rest+`,"template":"ubuntu-24.04-pve1"`)
 	r.After = []string{"ProxmoxTemplate ubuntu-24.04-pve1"}
 	return r
+}
+
+// ct declares a container of the cases' site by its VMID (ProxmoxLXC), with the values it manages.
+func ct(name string, vmid int, rest string) protocol.Resource {
+	spec := fmt.Sprintf(`{"node":"pve1","pool":"lab","tag":"mamela-lab","vmidMin":7000,"vmidMax":7009,"vmid":%d`, vmid)
+	if rest != "" {
+		spec += "," + rest
+	}
+	return protocol.Resource{ID: "ProxmoxLXC " + name, Kind: "ProxmoxLXC", Name: name, Spec: []byte(spec + `}`)}
+}
+
+// handmadeCT is a container a person made: in the pool, without a mark of Mamela's, with a
+// description and tags of its own.
+func handmadeCT(vmid int64, name string, running bool) fakepve.VM {
+	return fakepve.VM{VMID: vmid, Name: name, Node: "pve1", Pool: "lab", Type: "lxc", Cores: 1, Memory: 512, Swap: 512, DiskGiB: 4,
+		Running: running, Tags: "handmade", Description: "hand-made container: " + name + "\n"}
 }
 
 // guardSettings are the guard's settings for the fake cluster, with the boundary of the cases.
@@ -96,6 +113,22 @@ func TestConformance(t *testing.T) {
 					f.Put(fakepve.VM{VMID: 105, Name: "someone-else", Node: "pve1", Type: "lxc", Running: true})
 				},
 				Explicit: []providertest.Explicit{{Op: proxmox.OpAdopt, Resource: "ProxmoxVM old"}}},
+			// Containers a person made, adopted by their declared VMIDs (no import), then managed as
+			// declared: grown, resized at once, kept running or shut down, restarted and stopped by
+			// hand; a VM beside them is made with a VMID no container has, and someone else's
+			// container is left alone.
+			{Name: "containers", Desired: []protocol.Resource{
+				ct("dns", 7000, `"cores":2,"memoryMib":1024,"swapMib":256,"rootfsGib":8,"onboot":true,"power":"running"`),
+				ct("batch", 7001, `"power":"stopped"`),
+				vm("web", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)},
+				World: func(api http.Handler) {
+					f := api.(*fakepve.Server)
+					f.Put(handmadeCT(7000, "dns", false))
+					f.Put(handmadeCT(7001, "batch", true))
+					f.Put(fakepve.VM{VMID: 105, Name: "someone-else", Node: "pve1", Type: "lxc", Running: true, Memory: 2048, DiskGiB: 8})
+				},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC dns"}, {Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC batch"},
+					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC dns"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC dns"}}},
 			{Name: "two-vms-static", Desired: []protocol.Resource{
 				vm("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
 				vm("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)}},
