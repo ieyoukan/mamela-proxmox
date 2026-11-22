@@ -60,13 +60,27 @@ type Server struct {
 	volumes map[string]string // volid -> content
 	// Uploads counts the uploads it received.
 	Uploads int
-	// Node is the one node of the fake cluster ("pve1"); Permissions are what /access/permissions
-	// answers for any token; MemAvailable (bytes) and DiskTotal, DiskUsed (bytes, of every storage)
-	// what the node's and storages' status say; ImportStorages the storages that accept images.
+	// Node is the node of the fake cluster ("pve1"), with every other node a guest is on (all
+	// online); Permissions are what /access/permissions answers for any token; MemAvailable (bytes)
+	// and DiskTotal, DiskUsed (bytes, of every storage) what the nodes' and storages' status say,
+	// unless NodeMemAvailable has the node; ImportStorages the storages that accept images.
 	Node                              string
 	Permissions                       map[string]map[string]int
 	MemAvailable, DiskTotal, DiskUsed int64
+	NodeMemAvailable                  map[string]int64
 	ImportStorages                    []string
+}
+
+// nodes are the cluster's nodes: Node and every node a guest is on, sorted.
+func (s *Server) nodes() []string {
+	out := []string{s.Node}
+	for _, v := range s.vms {
+		if !slices.Contains(out, v.Node) {
+			out = append(out, v.Node)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // New returns a fake with no VMs and empty storages, on node pve1 with 64 GiB of memory available
@@ -164,11 +178,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, out)
 	})
 	mux.HandleFunc("GET /cluster/status", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, []map[string]any{{"type": "cluster", "name": "fake", "quorate": 1, "nodes": 1},
-			{"type": "node", "name": s.Node, "online": 1}})
+		nodes := s.nodes()
+		out := []map[string]any{{"type": "cluster", "name": "fake", "quorate": 1, "nodes": len(nodes)}}
+		for _, n := range nodes {
+			out = append(out, map[string]any{"type": "node", "name": n, "online": 1})
+		}
+		reply(w, 200, out)
 	})
 	mux.HandleFunc("GET /nodes/{node}/status", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, map[string]any{"memory": map[string]any{"available": s.MemAvailable, "free": s.MemAvailable, "total": 128 << 30}})
+		mem, ok := s.NodeMemAvailable[r.PathValue("node")]
+		if !ok {
+			mem = s.MemAvailable
+		}
+		reply(w, 200, map[string]any{"memory": map[string]any{"available": mem, "free": mem, "total": 128 << 30}})
 	})
 	mux.HandleFunc("GET /nodes/{node}/storage/{storage}/status", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"total": s.DiskTotal, "used": s.DiskUsed})
