@@ -152,13 +152,15 @@ pub fn proxmox_template_ref(r: ProxmoxTemplate) -> Ref {
 
 ## A container (LXC) on Proxmox VE that a person made, which Mamela manages once adopted (adopt-lxc): only the values
 ## declared; an omitted value is never changed. Mamela never creates, moves or deletes a container, and never shrinks its disk.
+## One outside the pool and the VMIDs is declared named, on its node, and named in the guard's settings too.
 ##
 ## `node`: the Proxmox VE node the container is on
-## `pool`: the pool Mamela's token may change (the container is in it)
+## `pool`: the pool Mamela's token may change (the container is in it, unless named)
 ## `tag`: the tag Mamela adds to the container's tags
 ## `vmid_min`: the first VMID Mamela may use
 ## `vmid_max`: the last VMID Mamela may use
 ## `vmid`: the VMID of the existing container to adopt (made by hand; Mamela creates none)
+## `named`: outside the pool and the VMIDs: a container the guard's settings name ([[provider.proxmox.guard.named]]), adopted where it is (optional)
 ## `cores`: its cores (not managed when omitted) (optional)
 ## `memory_mib`: its memory in MiB (not managed when omitted) (optional)
 ## `swap_mib`: its swap in MiB (not managed when omitted) (optional)
@@ -173,6 +175,7 @@ pub type ProxmoxLxc(
   vmid_min: Int,
   vmid_max: Int,
   vmid: Int,
+  named: Option[Bool],
   cores: Option[Int],
   memory_mib: Option[Int],
   swap_mib: Option[Int],
@@ -191,6 +194,10 @@ pub fn proxmox_lxc(graph: Mamela.Graph, r: ProxmoxLxc) -> Mamela.Graph {
       [("vmidMin", integer(r.vmid_min))],
       [("vmidMax", integer(r.vmid_max))],
       [("vmid", integer(r.vmid))],
+      r.named match {
+        Some(v) -> [("named", Dynamic.Bool(v))]
+        None    -> []
+      },
       r.cores match {
         Some(v) -> [("cores", integer(v))]
         None    -> []
