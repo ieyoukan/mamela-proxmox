@@ -2,6 +2,7 @@ package proxmox
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ieyoukan/mamela/provider/protocol"
@@ -70,10 +71,23 @@ func user(token string) string { u, _, _ := strings.Cut(token, "!"); return u }
 
 func tokenName(token string) string { _, n, _ := strings.Cut(token, "!"); return n }
 
+// The roles of named guests' grants, one per step of their access: the same privileges for every
+// named guest of a step, and only ever granted on each one's /vms/<vmid>.
+const (
+	RoleNamedObserve = "MamelaLabNamedObserve"
+	RoleNamedChange  = "MamelaLabNamedChange"
+)
+
 // role is the role of a grant's path: one per path, so a privilege never reaches a path that does
-// not need it. The names are those of the earlier lab bootstrap, so that running this one on a
-// lab set up by it converges.
+// not need it (a named guest's path: one per step, see RoleNamedObserve). The names are those of the
+// earlier lab bootstrap, so that running this one on a lab set up by it converges.
 func role(g GuardSettings, path string) string {
+	if n, ok := namedAt(g, path); ok {
+		if n.Access == AccessChange {
+			return RoleNamedChange
+		}
+		return RoleNamedObserve
+	}
 	switch path {
 	case "/pool/" + g.Pool:
 		return "MamelaLabVM"
@@ -93,6 +107,16 @@ func role(g GuardSettings, path string) string {
 	}, path)
 }
 
+// namedAt is the named guest whose grant is on a path (/vms/<vmid>).
+func namedAt(g GuardSettings, path string) (NamedGuest, bool) {
+	for _, n := range g.Named {
+		if n.path() == path {
+			return n, true
+		}
+	}
+	return NamedGuest{}, false
+}
+
 // Permissions explains every grant: the path, the role, each privilege and the operations that
 // need it.
 func Permissions(m protocol.Manifest, c ScriptConfig) string {
@@ -100,13 +124,28 @@ func Permissions(m protocol.Manifest, c ScriptConfig) string {
 	fmt.Fprintf(&b, "The operating token %s gets exactly these privileges (from the provider's manifest):\n", c.TokenID)
 	for _, g := range Grants(m, c.Guard) {
 		fmt.Fprintf(&b, "\n%s (role %s)\n", g.Path, role(c.Guard, g.Path))
+		if n, ok := namedAt(c.Guard, g.Path); ok {
+			fmt.Fprintf(&b, "  named guest: %s on %s, access %s\n", n.Type, n.Node, n.Access)
+		}
 		for _, p := range g.Privs {
 			fmt.Fprintf(&b, "  %-26s %s\n", p, strings.Join(g.Reasons[p], ", "))
 		}
 	}
 	fmt.Fprintf(&b, "\nA pool's privileges reach the VMs in it (/vms/%d..%d). The guard blocks an apply when the token holds\n"+
 		"anything else, or lacks any of these. The audit token %s gets PVEAuditor (read-only) on /.\n", c.Guard.VMIDMin, c.Guard.VMIDMax, c.GuardTokenID)
+	if len(c.Guard.Named) > 0 {
+		fmt.Fprintf(&b, "A named guest's privileges are on its /vms/<vmid> only: with access %q, %s (Mamela sees it and changes nothing);\n"+
+			"with %q, also what adopting and changing it need. A person decides when to give %q: set it in the guest's\n"+
+			"[[provider.proxmox.guard.named]] entry, then run the bootstrap script again.\n", AccessObserve, strings.Join(namedObserve(m), ", "),
+			AccessChange, AccessChange)
+	}
 	return b.String()
+}
+
+// namedObserve are the privileges of a named guest observed only.
+func namedObserve(m protocol.Manifest) []string {
+	privs, _ := NamedPrivileges(m, NamedGuest{Type: "lxc", Access: AccessObserve})
+	return privs
 }
 
 // Bootstrap is the setup script: the pool, the import content type on the image storage, one role
@@ -143,9 +182,14 @@ func Bootstrap(m protocol.Manifest, c ScriptConfig) string {
 	w("content=\"$(pvesh get /storage/%s --output-format json | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"content\"])')\"", g.ImageStorage)
 	w("case \",$content,\" in *,import,*) ;; *) pvesm set %s --content \"$content,import\" ;; esac", g.ImageStorage)
 	w("")
-	w("# 3. One role per path, with only the privileges that path needs (mamela provider script <pome-dir> proxmox permissions says why).")
+	w("# 3. One role per path, with only the privileges that path needs (mamela provider script <pome-dir> proxmox permissions says why);")
+	w("#    for named guests, one role per step of their access.")
+	var roles []string
 	for _, gr := range grants {
-		w("ensure_role %s %q", role(g, gr.Path), strings.Join(gr.Privs, ","))
+		if r := role(g, gr.Path); !slices.Contains(roles, r) {
+			roles = append(roles, r)
+			w("ensure_role %s %q", r, strings.Join(gr.Privs, ","))
+		}
 	}
 	w("")
 	w("# 4. The operating user and its privilege-separated token (no password, no login).")
@@ -155,10 +199,30 @@ func Bootstrap(m protocol.Manifest, c ScriptConfig) string {
 	w("# 5. ACLs. With privilege separation, the token gets the intersection of its own ACLs and its user's,")
 	w("#    so both receive the same grants. Nothing is granted on /, /vms or other pools.")
 	var keep []string
-	for _, gr := range grants {
+	acl := func(gr Grant) {
 		w("pveum acl modify %s --users %s --roles %s", gr.Path, opUser, role(g, gr.Path))
 		w("pveum acl modify %s --tokens '%s' --roles %s", gr.Path, c.TokenID, role(g, gr.Path))
 		keep = append(keep, gr.Path+" "+role(g, gr.Path))
+	}
+	for _, gr := range grants {
+		if _, named := namedAt(g, gr.Path); !named {
+			acl(gr)
+		}
+	}
+	if len(g.Named) > 0 {
+		w("")
+		w("# 5b. Existing guests named in [provider.proxmox.guard], outside pool %s and VMIDs %d..%d: each on its own", g.Pool, g.VMIDMin, g.VMIDMax)
+		w("#     /vms/<vmid> only. It stays where it is (it is not put in the pool). Its access is a person's decision:")
+		w("#       access = %q: %s only (Mamela sees it, plans and previews; it changes nothing);", AccessObserve, strings.Join(namedObserve(m), ", "))
+		w("#       access = %q: also what adopting and changing it need (mamela provider script <pome-dir> proxmox permissions).", AccessChange)
+		w("#     To let Mamela adopt and change a guest, set access = %q in its entry and run this script again;", AccessChange)
+		w("#     back to %q, or removing the entry, takes the grant away (step 6).", AccessObserve)
+		for _, gr := range grants {
+			if n, named := namedAt(g, gr.Path); named {
+				w("# guest %d (%s on %s), access %s: %s", n.VMID, n.Type, n.Node, n.Access, strings.Join(gr.Privs, ", "))
+				acl(gr)
+			}
+		}
 	}
 	w("")
 	w("# 6. Remove the operating user's and token's ACL entries that are not in step 5 (left by earlier")

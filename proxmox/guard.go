@@ -21,9 +21,14 @@ import (
 //
 // Before, it checks the cluster (quorum, nodes), the operating token (its permissions are exactly
 // the grants this provider needs: no more, no less), the room the changes need (memory, storage),
-// the boundary (no foreign guest in the pool or the VMID range, the number of VMs) and the changes
-// themselves (each stays inside the boundary the operator set, whatever the declaration says), and
-// it records every guest outside the boundary. After, it checks that those guests are unchanged.
+// the boundary (no foreign guest in the pool or the VMID range, the number of VMs, the named
+// guests where they are named) and the changes themselves (each stays inside the boundary the
+// operator set, whatever the declaration says), and it records every guest outside the boundary.
+// After, it checks that those guests are unchanged.
+//
+// The boundary is the pool and the VMID range on the node, and the guests the operator names one
+// by one (Named): existing guests elsewhere (another node, no pool, a VMID out of the range) that
+// Mamela may adopt where they are, without widening the boundary to their neighbours.
 
 // GuardSettings are the operator's settings ([provider.proxmox.guard] in mamela.providers.toml):
 // the lab boundary and the safety thresholds. They are not secret.
@@ -44,7 +49,33 @@ type GuardSettings struct {
 	// changes; MaxStorageUsedPercent the most the disk storage may be used after them.
 	MinHostMemAvailableMiB int64 `json:"min_host_mem_available_mib"`
 	MaxStorageUsedPercent  int64 `json:"max_storage_used_percent"`
+	// Named are existing guests the operator adds to the boundary one by one
+	// ([[provider.proxmox.guard.named]]): outside the pool and the VMID range, each is inside only
+	// where it is named (its node and type), and the operating token reaches only its /vms/<vmid>.
+	Named []NamedGuest `json:"named,omitempty"`
 }
+
+// NamedGuest is one existing guest named into the boundary: a guest a person made, outside the pool
+// and the VMID range, that Mamela may adopt where it is. It is never moved into the pool.
+type NamedGuest struct {
+	Node string `json:"node"`
+	VMID int64  `json:"vmid"`
+	Type string `json:"type"` // lxc; qemu is refused (a VM cannot be adopted by its VMID yet)
+	// Access is what the operating token may do to it, a person's decision made in two steps:
+	// AccessObserve (VM.Audit: Mamela sees it, plans and previews, and changes nothing), then
+	// AccessChange (also what adopting and changing it need). The bootstrap script grants exactly
+	// that on /vms/<vmid>, and the guard holds the token to it.
+	Access string `json:"access"`
+}
+
+// The steps of a named guest's access.
+const (
+	AccessObserve = "observe"
+	AccessChange  = "change"
+)
+
+// path is the ACL path of a named guest: the only place the operating token holds anything for it.
+func (n NamedGuest) path() string { return "/vms/" + strconv.FormatInt(n.VMID, 10) }
 
 // ParseGuardSettings reads the settings strictly and checks them.
 func ParseGuardSettings(b []byte) (GuardSettings, error) {
@@ -65,14 +96,70 @@ func ParseGuardSettings(b []byte) (GuardSettings, error) {
 	case s.MaxVMs < 1 || s.MinHostMemAvailableMiB < 0 || s.MaxStorageUsedPercent < 1 || s.MaxStorageUsedPercent > 100:
 		return s, errors.New("[provider.proxmox.guard]: max_vms (1 or more), min_host_mem_available_mib and max_storage_used_percent (1 to 100) are required")
 	}
+	seen := map[int64]bool{}
+	for _, n := range s.Named {
+		where := fmt.Sprintf("[[provider.proxmox.guard.named]] vmid %d", n.VMID)
+		switch {
+		case n.Node == "":
+			return s, fmt.Errorf("%s: node is required (the node the guest is on)", where)
+		case n.VMID < 100 || n.VMID > 999999999:
+			return s, fmt.Errorf("%s: not a Proxmox VMID", where)
+		case seen[n.VMID]:
+			return s, fmt.Errorf("%s: named twice; name each guest once", where)
+		case s.inRange(n.VMID):
+			return s, fmt.Errorf("%s: it is in the VMID range %d..%d, which is inside the boundary by its pool: put the guest in pool %s "+
+				"instead of naming it (name only guests outside the range)", where, s.VMIDMin, s.VMIDMax, s.Pool)
+		case n.Type == "qemu":
+			return s, fmt.Errorf("%s: naming a VM (qemu) is not supported yet: a ProxmoxVM is adopted by its VMID only when it was imported "+
+				"from Terraform or made by Mamela's built-in provider, inside the pool and the range; remove the entry (only containers, "+
+				"type = \"lxc\", can be named)", where)
+		case n.Type != "lxc":
+			return s, fmt.Errorf("%s: type %q is not lxc (a container; qemu is not supported yet)", where, n.Type)
+		case n.Access != AccessObserve && n.Access != AccessChange:
+			return s, fmt.Errorf("%s: access %q is not %q (VM.Audit only: Mamela sees it and changes nothing) or %q (also what adopting "+
+				"and changing it need); a person decides, and the bootstrap script grants it", where, n.Access, AccessObserve, AccessChange)
+		}
+		seen[n.VMID] = true
+	}
 	return s, nil
 }
 
 func (s GuardSettings) inRange(vmid int64) bool { return vmid >= s.VMIDMin && vmid <= s.VMIDMax }
 
-// IsLab reports whether a guest is inside the boundary: in the pool and in the VMID range. The tag
-// is not required: a VM is tagged at the end of its create, and a half-made one is still inside.
-func (s GuardSettings) IsLab(g Guest) bool { return g.Pool == s.Pool && s.inRange(g.VMID) }
+// named is the guest named with a VMID, if any.
+func (s GuardSettings) named(vmid int64) (NamedGuest, bool) {
+	i := slices.IndexFunc(s.Named, func(n NamedGuest) bool { return n.VMID == vmid })
+	if i < 0 {
+		return NamedGuest{}, false
+	}
+	return s.Named[i], true
+}
+
+// isNamed says whether a guest is a named one where it is named: its VMID, node and type, and out of
+// the pool (a pool's grants would reach it: PVE-0302).
+func (s GuardSettings) isNamed(g Guest) bool {
+	n, ok := s.named(g.VMID)
+	return ok && g.Node == n.Node && g.Type == n.Type && g.Pool != s.Pool
+}
+
+// IsLab reports whether a guest is inside the boundary: in the pool and in the VMID range, or a
+// named guest where it is named. The tag is not required: a VM is tagged at the end of its create,
+// and a half-made one is still inside; a named guest is tagged when it is adopted.
+func (s GuardSettings) IsLab(g Guest) bool {
+	return g.Pool == s.Pool && s.inRange(g.VMID) || s.isNamed(g)
+}
+
+// namedNodes are the nodes, other than the settings' node, that named guests are on (sorted).
+func (s GuardSettings) namedNodes() []string {
+	var out []string
+	for _, n := range s.Named {
+		if n.Node != s.Node && !slices.Contains(out, n.Node) {
+			out = append(out, n.Node)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // Guest is a VM or container as the audit token sees it.
 type Guest struct {
@@ -105,6 +192,16 @@ type Facts struct {
 	ImportStorages          []string
 	// Permissions are the operating token's: path -> privilege -> 1 when held.
 	Permissions map[string]map[string]int
+	// NamedNodes are the room on each other node a named guest is on (GuardSettings.namedNodes):
+	// a change of a named guest there needs its room there.
+	NamedNodes map[string]Room
+}
+
+// Room is what a node has left: whether it is online, its memory available and its disk storage's
+// size and use (bytes; DiskTotal is 0 when the storage is unknown on it).
+type Room struct {
+	Online                            bool
+	MemAvailable, DiskTotal, DiskUsed int64
 }
 
 // Guard calls.
@@ -191,28 +288,14 @@ func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
 	}
 	slices.SortFunc(f.Guests, func(a, b Guest) int { return int(a.VMID - b.VMID) })
 
+	var err error
 	if f.NodeOnline {
-		var ns struct {
-			Memory struct {
-				Free      int64 `json:"free"`
-				Available int64 `json:"available"`
-			} `json:"memory"`
-		}
-		if err := get(c, nodeStatus, map[string]string{"node": s.Node}, nil, &ns); err != nil {
+		if f.MemAvailable, err = memAvailable(c, s.Node); err != nil {
 			return nil, err
 		}
-		f.MemAvailable = ns.Memory.Available
-		if f.MemAvailable == 0 { // older Proxmox VE reports only free memory
-			f.MemAvailable = ns.Memory.Free
-		}
-		var ss struct {
-			Total int64 `json:"total"`
-			Used  int64 `json:"used"`
-		}
-		if err := get(c, storageStatus, map[string]string{"node": s.Node, "storage": s.DiskStorage}, nil, &ss); err != nil {
+		if f.DiskTotal, f.DiskUsed, err = storageUse(c, s.Node, s.DiskStorage); err != nil {
 			return nil, err
 		}
-		f.DiskTotal, f.DiskUsed = ss.Total, ss.Used
 		var st []struct {
 			Storage string `json:"storage"`
 		}
@@ -223,10 +306,54 @@ func Gather(c *kit.Client, s GuardSettings) (*Facts, error) {
 			f.ImportStorages = append(f.ImportStorages, x.Storage)
 		}
 	}
+	for _, node := range s.namedNodes() {
+		r := Room{Online: online[node]}
+		if r.Online {
+			if r.MemAvailable, err = memAvailable(c, node); err != nil {
+				return nil, err
+			}
+			// The disk storage may not be on that node: then its size is unknown, and only a change
+			// that grows a disk there is blocked (PVE-0202).
+			r.DiskTotal, r.DiskUsed, _ = storageUse(c, node, s.DiskStorage)
+		}
+		if f.NamedNodes == nil {
+			f.NamedNodes = map[string]Room{}
+		}
+		f.NamedNodes[node] = r
+	}
 	if err := get(c, permissions, nil, map[string][]string{"userid": {s.OperatingToken}}, &f.Permissions); err != nil {
 		return nil, fmt.Errorf("the operating token's permissions: %w", err)
 	}
 	return f, nil
+}
+
+// memAvailable is the memory available on a node (bytes).
+func memAvailable(c *kit.Client, node string) (int64, error) {
+	var ns struct {
+		Memory struct {
+			Free      int64 `json:"free"`
+			Available int64 `json:"available"`
+		} `json:"memory"`
+	}
+	if err := get(c, nodeStatus, map[string]string{"node": node}, nil, &ns); err != nil {
+		return 0, err
+	}
+	if ns.Memory.Available == 0 { // older Proxmox VE reports only free memory
+		return ns.Memory.Free, nil
+	}
+	return ns.Memory.Available, nil
+}
+
+// storageUse is a storage's size and use on a node (bytes).
+func storageUse(c *kit.Client, node, storage string) (total, used int64, err error) {
+	var ss struct {
+		Total int64 `json:"total"`
+		Used  int64 `json:"used"`
+	}
+	if err := get(c, storageStatus, map[string]string{"node": node, "storage": storage}, nil, &ss); err != nil {
+		return 0, 0, err
+	}
+	return ss.Total, ss.Used, nil
 }
 
 // Need is what the changes of one apply need of the node and the storage, guest by guest (a VM or
@@ -359,8 +486,10 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 		add("PVE-0102", ok, "the operating token has every permission this provider needs")
 	}
 
-	// Room on the node and the storage.
-	n := NeedOf(changes, f.Guests, s.DiskStorage)
+	// Room on the node and the storage: the changes of named guests on another node need room there
+	// (byNode), every other change on the settings' node.
+	byNode := s.byNode(changes)
+	n := NeedOf(byNode[s.Node], f.Guests, s.DiskStorage)
 	left := (f.MemAvailable >> 20) - n.MemoryMiB
 	if left < s.MinHostMemAvailableMiB {
 		add("PVE-0201", block, "only %d MiB would remain available on %s after the changes' %d MiB (minimum %d MiB): free memory or lower min_host_mem_available_mib",
@@ -383,24 +512,35 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 	} else {
 		add("PVE-0203", block, "storage %s does not accept importable images (content type \"import\"); run the bootstrap script (it adds it)", s.ImageStorage)
 	}
+	for _, node := range slices.Sorted(maps.Keys(byNode)) {
+		if node != s.Node {
+			out = append(out, checkNamedNode(s, node, f.NamedNodes[node], NeedOf(byNode[node], f.Guests, s.DiskStorage))...)
+		}
+	}
 
 	// The boundary.
 	lab := 0
 	for _, g := range f.Guests {
+		_, named := s.named(g.VMID)
 		switch {
 		case s.inRange(g.VMID) && !s.IsLab(g):
 			add("PVE-0301", block, "guest %d (%s) is in the VMID range %d..%d but not in pool %s (pool %q): someone else's guest, or a create still running",
 				g.VMID, g.Name, s.VMIDMin, s.VMIDMax, s.Pool, g.Pool)
+		case g.Pool == s.Pool && !s.IsLab(g) && named:
+			add("PVE-0302", block, "guest %d (%s) is named in [provider.proxmox.guard] and is in pool %s, outside the VMID range %d..%d: the pool's grants "+
+				"reach it beyond what its name gives; a named guest stays where it is, out of the pool: take it out of pool %s", g.VMID, g.Name, s.Pool,
+				s.VMIDMin, s.VMIDMax, s.Pool)
 		case g.Pool == s.Pool && !s.IsLab(g):
 			add("PVE-0302", block, "guest %d (%s) is in pool %s but outside the VMID range %d..%d", g.VMID, g.Name, s.Pool, s.VMIDMin, s.VMIDMax)
 		case s.IsLab(g):
 			lab++
 		}
 	}
-	if int64(lab+n.Creates) > s.MaxVMs {
-		add("PVE-0303", block, "the boundary has %d VM(s); %d more would exceed max_vms %d", lab, n.Creates, s.MaxVMs)
+	creates := NeedOf(changes, f.Guests, s.DiskStorage).Creates
+	if int64(lab+creates) > s.MaxVMs {
+		add("PVE-0303", block, "the boundary has %d VM(s); %d more would exceed max_vms %d", lab, creates, s.MaxVMs)
 	} else {
-		add("PVE-0303", ok, "the boundary has %d VM(s) and the changes create %d; max_vms is %d", lab, n.Creates, s.MaxVMs)
+		add("PVE-0303", ok, "the boundary has %d VM(s) and the changes create %d; max_vms is %d", lab, creates, s.MaxVMs)
 	}
 	outside := 0
 	for _, c := range changes {
@@ -410,23 +550,130 @@ func Check(s GuardSettings, m protocol.Manifest, f *Facts, changes []protocol.Ch
 		}
 	}
 	if outside == 0 {
-		add("PVE-0304", ok, "every change stays on node %s, in pool %s and VMIDs %d..%d", s.Node, s.Pool, s.VMIDMin, s.VMIDMax)
+		named := ""
+		if len(s.Named) > 0 {
+			named = fmt.Sprintf(", or on the %d named guest(s) where they are named", len(s.Named))
+		}
+		add("PVE-0304", ok, "every change stays on node %s, in pool %s and VMIDs %d..%d%s", s.Node, s.Pool, s.VMIDMin, s.VMIDMax, named)
 	}
+	out = append(out, checkNamed(s, f.Guests)...)
 	out = append(out, checkStaticAddresses(s, f.Guests, changes)...)
 	return out
 }
 
+// byNode groups changes by the node whose room they need: a change of a named guest on another
+// node needs that node's; every other change is counted on the settings' node (one on another node
+// is outside the boundary anyway: PVE-0304).
+func (s GuardSettings) byNode(changes []protocol.Change) map[string][]protocol.Change {
+	out := map[string][]protocol.Change{s.Node: nil}
+	for _, c := range changes {
+		node := s.Node
+		if vmid, err := strconv.ParseInt(c.IDs["vmid"], 10, 64); err == nil {
+			if n, ok := s.named(vmid); ok && n.Node == c.IDs["node"] {
+				node = n.Node
+			}
+		}
+		out[node] = append(out[node], c)
+	}
+	return out
+}
+
+// checkNamedNode checks the room the changes of named guests on another node need there: that node
+// online, its memory and its disk storage (when a disk grows there), with the same thresholds.
+func checkNamedNode(s GuardSettings, node string, r Room, n Need) []protocol.Finding {
+	block := protocol.SeverityBlock
+	if !r.Online {
+		return []protocol.Finding{finding("PVE-0003", block, "node %s (of named guests) is not online: their changes cannot be made", node)}
+	}
+	var out []protocol.Finding
+	if left := (r.MemAvailable >> 20) - n.MemoryMiB; left < s.MinHostMemAvailableMiB {
+		out = append(out, finding("PVE-0201", block, "only %d MiB would remain available on %s after the named guests' changes' %d MiB (minimum %d MiB): "+
+			"free memory or lower min_host_mem_available_mib", left, node, n.MemoryMiB, s.MinHostMemAvailableMiB))
+	} else {
+		out = append(out, finding("PVE-0201", protocol.SeverityOK, "%d MiB would remain available on %s after the named guests' changes' %d MiB",
+			left, node, n.MemoryMiB))
+	}
+	switch {
+	case n.DiskGiB == 0:
+	case r.DiskTotal <= 0:
+		out = append(out, finding("PVE-0202", block, "the size of storage %s on %s is unknown (is it on that node?): a disk cannot grow there", s.DiskStorage, node))
+	default:
+		after := float64(r.DiskUsed+n.DiskGiB<<30) / float64(r.DiskTotal) * 100
+		if after > float64(s.MaxStorageUsedPercent) {
+			out = append(out, finding("PVE-0202", block, "storage %s on %s would be %.1f%% used after the named guests' changes' %d GiB (maximum %d%%)",
+				s.DiskStorage, node, after, n.DiskGiB, s.MaxStorageUsedPercent))
+		} else {
+			out = append(out, finding("PVE-0202", protocol.SeverityOK, "storage %s on %s would be %.1f%% used after the named guests' changes' %d GiB",
+				s.DiskStorage, node, after, n.DiskGiB))
+		}
+	}
+	return out
+}
+
+// checkNamed checks that each named guest is where it is named: a guest with its VMID, of its type,
+// on its node. One that is not (gone, migrated, another guest at its VMID) is outside the boundary
+// (read-only, Foreign), and the operating token still holds what its name gives on its VMID: with
+// access "change", that blocks every apply until a person fixes the settings and the grants.
+func checkNamed(s GuardSettings, guests []Guest) []protocol.Finding {
+	if len(s.Named) == 0 {
+		return nil
+	}
+	var out []protocol.Finding
+	for _, n := range s.Named {
+		var why string
+		switch i := slices.IndexFunc(guests, func(g Guest) bool { return g.VMID == n.VMID }); {
+		case i < 0:
+			why = "no guest has that VMID now"
+		case guests[i].Type != n.Type:
+			why = fmt.Sprintf("guest %d (%s) is a %s, not a %s: another guest has its VMID now", n.VMID, guests[i].Name, typeName(guests[i].Type), typeName(n.Type))
+		case guests[i].Node != n.Node:
+			why = fmt.Sprintf("guest %d (%s) is on node %s, not %s: it was migrated", n.VMID, guests[i].Name, guests[i].Node, n.Node)
+		default:
+			continue // where it is named (in Mamela's pool: PVE-0302)
+		}
+		sev, reach := protocol.SeverityWarn, "read"
+		if n.Access == AccessChange {
+			sev, reach = protocol.SeverityBlock, "change"
+		}
+		out = append(out, finding("PVE-0305", sev, "guest %d is named in [provider.proxmox.guard] as a %s on %s, but %s. It is outside the boundary: "+
+			"nothing of it is changed (read-only), yet the operating token may %s whatever has VMID %d (access %s). Name it where it is (node, type), "+
+			"or remove its entry and run the bootstrap script again (it takes the grant on /vms/%d away)",
+			n.VMID, typeName(n.Type), n.Node, why, reach, n.VMID, n.Access, n.VMID))
+	}
+	if len(out) == 0 {
+		out = append(out, finding("PVE-0305", protocol.SeverityOK, "the %d named guest(s) are where they are named", len(s.Named)))
+	}
+	return out
+}
+
+func typeName(t string) string {
+	switch t {
+	case "lxc":
+		return "container (lxc)"
+	case "qemu":
+		return "VM (qemu)"
+	}
+	return t
+}
+
 // Outside lists how a change leaves the boundary the operator set: another node, a VMID out of the
-// range, another pool, storage, bridge or tag. A container's change is checked against the guest
-// it names (guests, as the audit token sees them): a container in the pool, whose root filesystem
-// is on the disk storage, keeping the tag.
+// range (and not a named guest's), another pool, storage, bridge or tag. A container's change is
+// checked against the guest it names (guests, as the audit token sees them): a container in the
+// pool, or the named container where it is named, whose root filesystem is on the disk storage,
+// keeping the tag. A named guest's change must be a container's, on its node, and its access
+// "change".
 func Outside(s GuardSettings, c protocol.Change, guests []Guest) []string {
 	var out []string
-	if c.IDs["node"] != s.Node {
-		out = append(out, fmt.Sprintf("node %q is not %s", c.IDs["node"], s.Node))
-	}
-	if vmid, err := strconv.ParseInt(c.IDs["vmid"], 10, 64); err != nil || !s.inRange(vmid) {
-		out = append(out, fmt.Sprintf("VMID %q is not in %d..%d", c.IDs["vmid"], s.VMIDMin, s.VMIDMax))
+	vmid, err := strconv.ParseInt(c.IDs["vmid"], 10, 64)
+	if n, named := s.named(vmid); err == nil && named {
+		out = append(out, outsideNamed(n, c)...)
+	} else {
+		if c.IDs["node"] != s.Node {
+			out = append(out, fmt.Sprintf("node %q is not %s", c.IDs["node"], s.Node))
+		}
+		if err != nil || !s.inRange(vmid) {
+			out = append(out, fmt.Sprintf("VMID %q is not in %d..%d, and no guest is named with it in [provider.proxmox.guard]", c.IDs["vmid"], s.VMIDMin, s.VMIDMax))
+		}
 	}
 	if st, ok := c.IDs["storage"]; ok && st != s.ImageStorage {
 		out = append(out, fmt.Sprintf("storage %q is not %s", st, s.ImageStorage))
@@ -481,9 +728,27 @@ func Outside(s GuardSettings, c protocol.Change, guests []Guest) []string {
 	return out
 }
 
+// outsideNamed lists how a change of a named guest leaves the boundary: it is not a container's
+// change (only containers can be named), it is on another node than the guest is named on, or the
+// guest's access is only "observe".
+func outsideNamed(n NamedGuest, c protocol.Change) []string {
+	var out []string
+	if c.Kind != KindLXC || n.Type != "lxc" {
+		out = append(out, fmt.Sprintf("VMID %d is a named guest (%s on %s): only a container's (ProxmoxLXC) changes may reach it", n.VMID, n.Type, n.Node))
+	}
+	if c.IDs["node"] != n.Node {
+		out = append(out, fmt.Sprintf("node %q is not %s, where guest %d is named", c.IDs["node"], n.Node, n.VMID))
+	}
+	if n.Access != AccessChange {
+		out = append(out, fmt.Sprintf("guest %d is named with access %q: Mamela may only read it; when a person decides Mamela may change it, "+
+			"set access = %q in its [[provider.proxmox.guard.named]] entry and run the bootstrap script again", n.VMID, n.Access, AccessChange))
+	}
+	return out
+}
+
 // outsideContainer lists how a container's change leaves the boundary: the guest it names is not a
-// container in the pool on the node, its root filesystem is not on the disk storage, or the tags
-// it sets lack the tag.
+// container in the pool on the node (or, named, out of the pool where it is named), its root
+// filesystem is not on the disk storage, or the tags it sets lack the tag.
 func outsideContainer(s GuardSettings, c protocol.Change, guests []Guest) []string {
 	var out []string
 	i := slices.IndexFunc(guests, func(g Guest) bool { return strconv.FormatInt(g.VMID, 10) == c.IDs["vmid"] })
@@ -496,7 +761,12 @@ func outsideContainer(s GuardSettings, c protocol.Change, guests []Guest) []stri
 		out = append(out, fmt.Sprintf("guest %d (%s) is a VM (%s), not a container", g.VMID, g.Name, g.Type))
 	default:
 		g = guests[i]
-		if g.Pool != s.Pool {
+		_, named := s.named(g.VMID)
+		switch {
+		case named && g.Pool == s.Pool:
+			out = append(out, fmt.Sprintf("named container %d (%s) is in pool %s, outside the VMIDs %d..%d: a named guest stays out of the pool",
+				g.VMID, g.Name, s.Pool, s.VMIDMin, s.VMIDMax))
+		case !named && g.Pool != s.Pool:
 			out = append(out, fmt.Sprintf("container %d (%s) is in pool %q, not %s", g.VMID, g.Name, g.Pool, s.Pool))
 		}
 		if g.Node != c.IDs["node"] {
@@ -615,7 +885,8 @@ type Grant struct {
 }
 
 // Grants are every permission the operating token needs, from the manifest's needs (observing and
-// every supported operation) with the settings filled in. The pool's grant comes first.
+// every supported operation) with the settings filled in, and those of each named guest on its own
+// /vms/<vmid> (NamedPrivileges). The pool's grant comes first.
 func Grants(m protocol.Manifest, s GuardSettings) []Grant {
 	refs := strings.NewReplacer("{pool}", s.Pool, "{diskStorage}", s.DiskStorage, "{imageStorage}", s.ImageStorage, "{bridge}", s.Bridge, "{node}", s.Node)
 	by := map[string]*Grant{}
@@ -643,6 +914,10 @@ func Grants(m protocol.Manifest, s GuardSettings) []Grant {
 			}
 		}
 	}
+	for _, n := range s.Named {
+		privs, reasons := NamedPrivileges(m, n)
+		by[n.path()] = &Grant{Path: n.path(), Privs: privs, Reasons: reasons}
+	}
 	pool := "/pool/" + s.Pool
 	paths := slices.SortedFunc(maps.Keys(by), func(a, b string) int {
 		switch {
@@ -660,6 +935,45 @@ func Grants(m protocol.Manifest, s GuardSettings) []Grant {
 		out = append(out, g)
 	}
 	return out
+}
+
+// NamedPrivileges are what the operating token holds on a named guest's /vms/<vmid>, each with the
+// operations that need it: what a pool's grant gives its guests (the manifest's needs on the pool),
+// narrowed to the guest's kind and its access. With access "observe", observing's VM.Audit only;
+// with "change", also what every operation of its kind needs there (a container's: adopt-lxc,
+// configure-lxc, grow-lxc-rootfs, start-lxc, shutdown-lxc, reboot-lxc, stop-lxc). Nothing of the
+// pool itself (Pool.Audit), and no other path: the storage and the bridge are granted already.
+func NamedPrivileges(m protocol.Manifest, n NamedGuest) (privs []string, reasons map[string][]string) {
+	reasons = map[string][]string{}
+	add := func(why string, needs []protocol.Need) {
+		for _, x := range needs {
+			if x.Target.Ref != AtPool || !strings.HasPrefix(x.Capability, "VM.") {
+				continue
+			}
+			if !slices.Contains(privs, x.Capability) {
+				privs = append(privs, x.Capability)
+			}
+			if !slices.Contains(reasons[x.Capability], why) {
+				reasons[x.Capability] = append(reasons[x.Capability], why)
+			}
+		}
+	}
+	add("observe", m.Observe)
+	if n.Access == AccessChange {
+		kind := map[string]protocol.ResourceKind{"lxc": KindLXC}[n.Type]
+		for _, k := range m.Kinds {
+			if k.Kind != kind {
+				continue
+			}
+			for _, o := range k.Operations {
+				if o.Support == protocol.Supported {
+					add(string(o.Op), o.Needs)
+				}
+			}
+		}
+	}
+	slices.Sort(privs)
+	return privs, reasons
 }
 
 // allowed is what the token may hold on a path: a grant's privileges, or for a VM in the range the
