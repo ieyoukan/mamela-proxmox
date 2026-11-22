@@ -1,6 +1,6 @@
 # mamela-proxmox
 
-[Mamela](https://github.com/ieyoukan/mamela) のプロバイダーです。Proxmox VE の VM を作り、その上で Mamela のエージェント（mamelet）を動かします。人が手で作ったコンテナ（LXC）も、引き継いで管理できます（「[コンテナ（LXC）](#コンテナlxc)」）。
+[Mamela](https://github.com/ieyoukan/mamela) のプロバイダーです。Proxmox VE の VM を作り、その上で Mamela のエージェント（mamelet）を動かします。人が手で作ったコンテナ（LXC）も、引き継いで管理できます（「[コンテナ（LXC）](#コンテナlxc)」）。境界の外（別のノード、pool の外）にある既存のコンテナは、運用者が 1 つずつ名指ししたものだけを、その場所のまま引き継げます（「[境界の外のコンテナを名指しで引き継ぐ](#境界の外のコンテナを名指しで引き継ぐ)」）。
 
 - **隔離して動く:** プロバイダーは WASM で動きます。Proxmox には、Mamela の host を通してしかつなげません。
 - **host が持つもの:**
@@ -74,11 +74,12 @@ Proxmox のクラスタには、Mamela と関係のないゲストが動いて�
 
 | コード | 前 / 後 | 確かめること |
 |---|---|---|
-| `PVE-0001`〜`0003` | 前 | クォーラム、ノードの数、対象のノードが動いていること |
+| `PVE-0001`〜`0003` | 前 | クォーラム、ノードの数、対象のノードが動いていること（名指ししたゲストの変更があれば、そのノードも） |
 | `PVE-0101`・`0102` | 前 | 操作用の Token の権限が、このプロバイダーに要る権限とちょうど同じこと（多すぎも少なすぎも止める） |
-| `PVE-0201`〜`0203` | 前 | 変更の後に残るメモリとストレージの余裕（コンテナのメモリの増加と起動、`disk_storage` にあるルートファイルシステムの拡大も数える）、イメージを置けるストレージ |
-| `PVE-0301`〜`0303` | 前 | pool と VMID の範囲に他人のゲストがないこと、ゲストの数（境界の中のコンテナも `max_vms` に数える） |
-| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ）の中にあること。コンテナの変更は、変えるゲストが pool の中のコンテナで、ルートファイルシステムが `disk_storage` にあり、タグを残すこと。宣言が何を書いても、ここで止まる |
+| `PVE-0201`〜`0203` | 前 | 変更の後に残るメモリとストレージの余裕（コンテナのメモリの増加と起動、`disk_storage` にあるルートファイルシステムの拡大も数える。名指ししたゲストの変更は、そのゲストのノードで数える）、イメージを置けるストレージ |
+| `PVE-0301`〜`0303` | 前 | pool と VMID の範囲に他人のゲストがないこと、名指ししたゲストが pool に入っていないこと、ゲストの数（境界の中のコンテナと名指ししたゲストも `max_vms` に数える） |
+| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ、名指ししたゲスト）の中にあること。コンテナの変更は、変えるゲストが pool の中のコンテナ（または名指しした場所にある、名指ししたコンテナ）で、ルートファイルシステムが `disk_storage` にあり、タグを残すこと。名指ししたゲストの変更は、`access = "change"` のときだけ。宣言が何を書いても、ここで止まる |
+| `PVE-0305` | 前 | 名指ししたゲストが、名指ししたとおりの場所にあること（同じ VMID、種類、ノード）。違えば境界の外として扱い、`access = "change"` なら apply を止める（`observe` なら警告） |
 | `PVE-0400`〜`0405` | 後 | 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと |
 
 `block` が 1 つでもあれば、Mamela はそのプロバイダーの変更を送りません。
@@ -88,9 +89,10 @@ Proxmox のクラスタには、Mamela と関係のないゲストが動いて�
 人が手で作ったコンテナ（Mamela でも Terraform でもなく）を、作り直さずに Mamela で管理できます。Mamela はコンテナを作りません（まだ）。そのため、宣言から外しても消しません。
 
 - **宣言:** `Proxmox.lxc(site, ct)` で、今あるコンテナを VMID で名指しします。管理する値は、宣言に書いたもの（`Some`）だけです。書かない値（`None`）は、Mamela が変えることも、差分として示すこともありません。
-- **境界:** 引き継げるのは、宣言の境界（`node`、`pool`、VMID の範囲）の中にあり、Mamela の印のないコンテナだけです。宣言の Site は guard の設定と同じ値にします。境界の外のコンテナは、名指ししても引き継がず、変えません。
+- **境界:** 引き継げるのは、宣言の境界（`node`、`pool`、VMID の範囲）の中にあり、Mamela の印のないコンテナだけです。宣言の Site は guard の設定と同じ値にします。境界の外のコンテナは、宣言で VMID を書いても引き継がず、変えません。
   - pool の外のコンテナは、操作用の Token から見えません。先に人が pool に入れます（VMID の範囲の中で pool の外にあるゲストがあれば、guard の PVE-0301 がすべての apply を止めます）。
   - VMID はその場で変えられません。範囲の外のコンテナは、範囲の空き VMID にバックアップから戻して宣言します。
+  - 別のノードや pool の外にあり、その場所のまま引き継ぎたいコンテナは、運用者が guard の設定で 1 つずつ名指しします（下の「[境界の外のコンテナを名指しで引き継ぐ](#境界の外のコンテナを名指しで引き継ぐ)」）。境界は、名指ししたコンテナの分だけ広がります。
 - **所有の印:** 引き継ぐと、説明（description）の最後に、このプロバイダーのコンテナ用のマーカーの行（`Managed by Mamela (proxmox provider): container <name>. Do not edit this line.`）を足し、タグに guard の `tag` を足します。今ある説明とタグはそのまま残ります。VM のマーカーとコンテナのマーカーは、取り違えません。
 
 | 値（`Proxmox.Lxc`） | 内容 |
@@ -152,13 +154,104 @@ mamela plan <pome-dir>                                                     # 宣
 | 操作 | 理由 |
 |---|---|
 | `shrink-lxc-rootfs` | 縮小はデータを壊しうる（Proxmox も拒む） |
-| `move-lxc` | 別のノード・pool・範囲外の VMID への移動はしない。手で移す（`pct migrate`）か、今ある場所を宣言する |
+| `move-lxc` | 別のノード・pool・範囲外の VMID への移動はしない。手で移す（`pct migrate`）か、今ある場所を宣言する（名指ししたコンテナを pool に入れることもしない） |
 | `create-lxc` | Mamela はコンテナを作らない。人が作ったものを引き継ぐ |
 
-- **権限:** 新しい権限は要りません（bootstrap の実行し直しも要りません）。使うのは、VM にもう付いている権限です。
+- **権限:** pool の中のコンテナには、新しい権限は要りません（bootstrap の実行し直しも要りません）。使うのは、VM にもう付いている権限です（名指ししたコンテナの権限は、下の「境界の外のコンテナを名指しで引き継ぐ」）。
   - pool: `VM.Audit`（読む）、`VM.Config.CPU`・`VM.Config.Memory`・`VM.Config.Options`（`configure-lxc`、`adopt-lxc`）、`VM.Config.Disk`（`grow-lxc-rootfs`）、`VM.PowerMgmt`（起動、停止、再起動）
   - `disk_storage`: `Datastore.AllocateSpace`（ルートファイルシステムを広げる）。ルートファイルシステムが別のストレージにあるコンテナは広げません（guard の PVE-0304 が止めます。Token にもその権限はありません）。
 - **mamelet:** 引き継いだコンテナは node です（`Proxmox.lxc_node(ct)`）。ただし、Mamela は mamelet を入れません。中のパッケージやサービスを宣言するには、別に mamelet を入れる必要があります。
+
+### 境界の外のコンテナを名指しで引き継ぐ
+
+本番のクラスタには、境界（guard の `node`・`pool`・VMID の範囲）の外に、人が手で作ったコンテナがあります（別のノードにある、pool に入っていない、VMID が範囲の外）。範囲や pool を広げると、隣の無関係なゲストまで境界に入ってしまいます。そこで、引き継ぎたいコンテナだけを、運用者が guard の設定で 1 つずつ名指しします。
+
+- **名指ししたものだけが境界に入る:** 名指ししたコンテナは、名指しした場所（ノード、VMID、種類）にある間だけ、境界の中として扱います。pool にも範囲にも入れる必要はなく、Mamela も pool に入れません（タグとマーカーは、今までどおり `adopt-lxc` が足します）。
+- **名指ししないものは今までどおり:** 境界の外のゲストは、同じノードの隣のコンテナも含めて、読むだけです（`Foreign`）。apply の前後に guard が変わっていないことを確かめます（PVE-0400〜0405）。
+- **権限はそのゲストの `/vms/<vmid>` にだけ、2 段階で:** bootstrap が、名指ししたゲストの `/vms/<vmid>` にだけ ACL を付けます。`/`、`/vms`、ノード、他の pool には付けません。どの段にするかは、人が設定（`access`）で決めます。
+  - **段 1（`access = "observe"`）:** `VM.Audit` だけ。Mamela はコンテナを見て、plan で引き継ぐ対象と変わること（プレビュー）を示します。何も変えません。引き継ぎも guard が止めます（PVE-0304）。
+  - **段 2（`access = "change"`）:** さらに、引き継ぎと変更に要る権限（`VM.Config.CPU`・`VM.Config.Disk`・`VM.Config.Memory`・`VM.Config.Options`・`VM.PowerMgmt`）。どれも、コンテナの操作（`adopt-lxc`、`configure-lxc`、`grow-lxc-rootfs`、`start-lxc`、`shutdown-lxc`、`reboot-lxc`、`stop-lxc`）がそのゲストに要るものです（マニフェストから導く）。
+- **まだしないこと:** VM（qemu）は名指しできません。VM を宣言の VMID で引き継ぐ仕組みがまだないためです（`type = "qemu"` の設定は、理由を示して拒みます）。
+
+設定（`mamela.providers.toml`。値は例です）:
+
+```toml
+[provider.proxmox.guard]
+node = "pve1"
+pool = "mamela"
+vmid_min = 7000
+vmid_max = 7099
+# ...（ほかの値は「使い方」の例のとおり）
+
+# 境界に名指しで足す既存のゲスト（pool と VMID の範囲の外）。1 つにつき 1 つ書く
+[[provider.proxmox.guard.named]]
+node = "pve2"          # いまゲストがあるノード
+vmid = 150             # VMID（範囲の外であること）
+type = "lxc"           # コンテナ。qemu はまだ使えない
+access = "observe"     # 段 1: observe（見るだけ）。引き継ぐと決めたら change にして bootstrap をもう一度
+```
+
+宣言（`Proxmox.named_lxc(site, node, ct)`）。Site はいつもの値のままで、ノードだけをコンテナのあるノードにします。値は `Proxmox.lxc` と同じです。
+
+```emela
+import Proxmox.{Lxc}
+
+far = Lxc(memory_mib: Some(1024), ..Proxmox.lxc_of("far", 150))
+
+Mamela.empty()
+  |> Proxmox.named_lxc(site, "pve2", far)
+```
+
+型付きの宣言（`Proxmox.Kinds.proxmox_lxc`）では、`node` をそのノードに、`named: Some(True)` にします。
+
+手順:
+
+```sh
+# 段 1: 見るだけ（access = "observe"）
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh   # 名指ししたゲストに VM.Audit を足す
+less bootstrap.sh                                                   # 確かめてから、ノードで root として実行
+mamela guard <pome-dir>                                             # PVE-0305: 名指ししたとおりの場所にあるか
+mamela plan <pome-dir>                                              # 引き継ぐ対象（MAM-PLAN-0114）と、変わること（プレビュー）
+
+# 段 2: 引き継ぐと決めたら（access = "change" に書き換える）
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh   # 変更の権限を足す
+less bootstrap.sh                                                   # 確かめてから、ノードで root として実行
+mamela guard <pome-dir>
+mamela act adopt-lxc "ProxmoxLXC far" <pome-dir>                    # 送るものを確かめる
+mamela act --confirm far adopt-lxc "ProxmoxLXC far" <pome-dir>      # 引き継ぐ（説明とタグに書き足すだけ）
+mamela plan <pome-dir>
+```
+
+bootstrap が名指ししたゲストに実行するのは、次の行だけです（VMID 150、操作用のユーザー `mamela@pve` と Token `mamela@pve!lab` の例）。手順 3 でロールを作り、手順 5b で ACL を付けます。手順 6 は、設定にない ACL（段を戻した、名指しを外した）を外します。
+
+```sh
+# 段 1（access = "observe"）
+ensure_role MamelaLabNamedObserve "VM.Audit"
+pveum acl modify /vms/150 --users mamela@pve --roles MamelaLabNamedObserve
+pveum acl modify /vms/150 --tokens 'mamela@pve!lab' --roles MamelaLabNamedObserve
+
+# 段 2（access = "change"）。段 1 の ACL（MamelaLabNamedObserve）は手順 6 が外す
+ensure_role MamelaLabNamedChange "VM.Audit,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Options,VM.PowerMgmt"
+pveum acl modify /vms/150 --users mamela@pve --roles MamelaLabNamedChange
+pveum acl modify /vms/150 --tokens 'mamela@pve!lab' --roles MamelaLabNamedChange
+```
+
+スクリプト全体は `proxmox/testdata/bootstrap-named-observe.sh` と `bootstrap-named-change.sh` にあります（試験が、プロバイダーの書くものと同じことを確かめます）。
+
+guard と plan が拒むもの（何も送りません）:
+
+| 場合 | どうなるか | 直し方 |
+|---|---|---|
+| 設定で名指ししていないコンテナを、宣言で `named_lxc` にした | 引き継ぎも変更も PVE-0304 が止める（Token からも見えない） | 設定で名指しし、bootstrap を実行し直す |
+| `access = "observe"` のまま引き継ぐ・変える | PVE-0304 が止める | 人が決めたら `access = "change"` にし、bootstrap を実行し直す |
+| 名指ししたコンテナが別のノードに移った（migrate） | 境界の外になる。plan は `create-lxc`（しない）として、どこにあるかを示す。`change` なら PVE-0305 がすべての apply を止める | 設定と宣言の `node` を今のノードにする |
+| 名指しした VMID が別の種類（VM）や別のゲストになった、なくなった | 境界の外になる。`change` なら PVE-0305 がすべての apply を止める | 名指しを外し、bootstrap を実行し直す（ACL が外れる） |
+| 名指ししたコンテナが Mamela の pool に入れられた | pool の権限が届いてしまうので、PVE-0302 が止める。引き継ぎもしない（`move-lxc`） | pool から外す |
+| 名指しした VMID が VMID の範囲の中 | 設定を拒む | pool に入れて `Proxmox.lxc` で宣言する |
+| `type = "qemu"` | 設定を拒む（まだ対応していない） | 名指しを外す |
+| 名指ししたコンテナのノードのメモリ・ストレージに余裕がない | そのノードで PVE-0201・0202 が止める | 余裕を作るか、宣言を小さくする |
+
+`mamela provider script <pome-dir> proxmox permissions` は、名指ししたゲストの権限と、それが要る操作も示します。
 
 ## Terraform からの乗り換え（Mamela の ADR 0009）
 
@@ -264,6 +357,13 @@ operating_token = "mamela@pve!lab"     # token_id と同じ
 max_vms = 6
 min_host_mem_available_mib = 4096
 max_storage_used_percent = 85
+
+# 境界の外の既存のコンテナを、1 つずつ名指しで境界に足す（任意。「境界の外のコンテナを名指しで引き継ぐ」）
+# [[provider.proxmox.guard.named]]
+# node = "pve2"
+# vmid = 150
+# type = "lxc"
+# access = "observe"     # observe（VM.Audit だけ）か change（引き継ぎと変更の権限も）
 ```
 
 ### 準備と片付け（root で実行するスクリプト）
@@ -279,7 +379,7 @@ mamela provider script <pome-dir> proxmox cleanup   > cleanup.sh
 
 - **プロバイダーに渡るもの:** `mamela.providers.toml` の `[provider.proxmox.guard]` と、Token の ID と秘密のファイルの場所だけです。秘密そのものは渡りません。
 - **Proxmox への要求:** スクリプトを書く間、プロバイダーは Proxmox に何も送れません（host が拒みます）。
-- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
+- **bootstrap:** pool、イメージを置けるストレージ、パスごとのロール、操作用と監査用のユーザーと Token、ACL を作ります。名指ししたゲストには、その `/vms/<vmid>` にだけ、設定の `access` の段の ACL を付けます。不要になった ACL は外します。何度実行しても同じ状態になります。権限は、guard が確かめるのと同じマニフェストから導くので、ずれません。
 - **cleanup:** どの VM も使っていないアップロード（`mamela-` で始まるイメージと seed）を一覧にします。`--free` を付けたときだけ seed を消します。イメージは次のテンプレートの元なので、`--free --images` のときだけ消します（消すと、次にテンプレートを作るときにもう一度アップロードします）。
 
 ## 例
@@ -314,6 +414,7 @@ go test ./...    # 適合試験（偽の Proxmox で）、guard、取り込み�
   - Terraform で作った VM を取り込み、引き継ぐと差分がなくなること（`fakepve/terraform.go`）
   - `mamela import terraform` の通し（state の JSON から Emela を書き、宣言として評価できること）
   - 人が作ったコンテナを、宣言した VMID で引き継ぎ（引き継ぐ前はプレビューだけ）、宣言のとおりに変えること。中断と再試行、境界の外・別の宣言のもの・VM の VMID・digest の変化・縮小・移動を拒むこと（`fakepve/lxc.go`）
+  - 名指ししたコンテナ（別のノード、pool の外）を、その場所のまま引き継いで変えること。名指ししていないもの・`observe` の段・移されたもの・種類の違うものを拒み、guard の後の検査が隣のゲストの変化を見つけること。bootstrap の出力（`proxmox/testdata`、`go test ./proxmox -run TestNamedScripts -update` で書き直す）
 - **観測の互換性:** 稼働中の Control Plane の記録は、観測した IDs で VM を保証します。`TestObservedIDsKeepTheirShape` が、IDs の形（宣言した VM は node・vmid・storage、それ以外は node・vmid）を固定します。コンテナの IDs（node・vmid。引き継ぐ前も後も同じ）は `TestLXCObservedIDsKeepTheirShape` が固定します。
 - **公開の方法:** このリポジトリのタグ（`pome/vX.Y.Z`）を push します。Pome の公開は取り消せません。プログラムを変えたら `version` を上げ、`./build.sh` で作り直してからタグを付けます。
 
