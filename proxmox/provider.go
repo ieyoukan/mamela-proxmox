@@ -221,6 +221,12 @@ func (w waiter) afterSend(c *kit.Client, ch protocol.Change, a protocol.Approved
 		return nil // done at once
 	}
 	if err := w.wait(c, ch.IDs["node"], upid); err != nil {
+		if ch.Op == OpDeleteLXC && a.Path == shutdownLXCWait.Path {
+			// Never forced: the container is left as it is, and the delete is not sent.
+			return fmt.Errorf("container %s (%s) did not shut down cleanly (%w): it was not forced, and nothing was deleted; find out why it "+
+				"does not stop (a process that ignores the request, a lock), stop it by hand if it is to go (mamela act --confirm %s stop-lxc "+
+				"%q <pome-dir>), then delete-lxc again", ch.IDs["vmid"], nameOf(ch.Resource), err, nameOf(ch.Resource), ch.Resource)
+		}
 		return fmt.Errorf("%s %s: %w", a.Method, a.Path, err)
 	}
 	return nil

@@ -19,8 +19,9 @@
 // be imported and taken over (imports.go).
 //
 // Kind ProxmoxLXC (lxc.go), a node kind too, is a container a person made by hand: Mamela manages
-// the values its declaration gives once a person adopts it (adopt-lxc), and never creates, moves
-// or deletes one.
+// the values its declaration gives once a person adopts it (adopt-lxc). It never creates or moves
+// one, and deletes one only when a person asks for it by name (delete-lxc), never because its
+// declaration was removed.
 //
 // Its guard (guard.go) checks the cluster before and after every apply: the boundary of pool, VMID
 // range and node; the operating token's permissions; the room on the node; and that no guest

@@ -729,10 +729,15 @@ func Outside(s GuardSettings, c protocol.Change, guests []Guest) []string {
 }
 
 // outsideNamed lists how a change of a named guest leaves the boundary: it is not a container's
-// change (only containers can be named), it is on another node than the guest is named on, or the
-// guest's access is only "observe".
+// change (only containers can be named), it is one that never reaches a named guest (deleting it),
+// it is on another node than the guest is named on, or the guest's access is only "observe".
 func outsideNamed(n NamedGuest, c protocol.Change) []string {
 	var out []string
+	if slices.Contains(neverNamed, c.Op) {
+		out = append(out, fmt.Sprintf("guest %d is a named guest (%s on %s): Mamela never deletes a named guest (a production guest the operator "+
+			"named into the boundary); a person deletes it by hand (pct destroy %d on %s), after removing its declaration and its "+
+			"[[provider.proxmox.guard.named]] entry", n.VMID, n.Type, n.Node, n.VMID, n.Node))
+	}
 	if c.Kind != KindLXC || n.Type != "lxc" {
 		out = append(out, fmt.Sprintf("VMID %d is a named guest (%s on %s): only a container's (ProxmoxLXC) changes may reach it", n.VMID, n.Type, n.Node))
 	}
@@ -937,12 +942,18 @@ func Grants(m protocol.Manifest, s GuardSettings) []Grant {
 	return out
 }
 
+// neverNamed are the operations that never reach a named guest: Mamela never deletes one (a
+// production guest the operator named; a person deletes it by hand). Its grant leaves them out, so
+// that Proxmox refuses them too (VM.Allocate), and the guard blocks them (PVE-0304).
+var neverNamed = []protocol.Op{OpDeleteLXC}
+
 // NamedPrivileges are what the operating token holds on a named guest's /vms/<vmid>, each with the
 // operations that need it: what a pool's grant gives its guests (the manifest's needs on the pool),
 // narrowed to the guest's kind and its access. With access "observe", observing's VM.Audit only;
 // with "change", also what every operation of its kind needs there (a container's: adopt-lxc,
-// configure-lxc, grow-lxc-rootfs, start-lxc, shutdown-lxc, reboot-lxc, stop-lxc). Nothing of the
-// pool itself (Pool.Audit), and no other path: the storage and the bridge are granted already.
+// configure-lxc, grow-lxc-rootfs, start-lxc, shutdown-lxc, reboot-lxc, stop-lxc), but those that
+// never reach a named guest (neverNamed: delete-lxc). Nothing of the pool itself (Pool.Audit), and
+// no other path: the storage and the bridge are granted already.
 func NamedPrivileges(m protocol.Manifest, n NamedGuest) (privs []string, reasons map[string][]string) {
 	reasons = map[string][]string{}
 	add := func(why string, needs []protocol.Need) {
@@ -966,7 +977,7 @@ func NamedPrivileges(m protocol.Manifest, n NamedGuest) (privs []string, reasons
 				continue
 			}
 			for _, o := range k.Operations {
-				if o.Support == protocol.Supported {
+				if o.Support == protocol.Supported && !slices.Contains(neverNamed, o.Op) {
 					add(string(o.Op), o.Needs)
 				}
 			}

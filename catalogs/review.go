@@ -58,7 +58,7 @@ var Reviewed = map[string]Review{
 	// cluster's backup and replication jobs, is not declared.
 	"DELETE /nodes/{node}/qemu/{vmid}": {Handler: "destroy_vm"},
 
-	// Containers: adopted (made by hand), never created or deleted.
+	// Containers: adopted (made by hand), never created; deleted only by the explicit delete-lxc.
 	"PUT /nodes/{node}/lxc/{vmid}/config": {Handler: "update_vm", Effect: protocol.EffectChange,
 		Why: "changes a container's configuration in place; only the parameters listed can be sent (cores, memory, swap, start at boot, " +
 			"tags and the description): none touches its root filesystem, mount points or network. Proxmox applies cores, memory and swap " +
@@ -70,8 +70,19 @@ var Reviewed = map[string]Review{
 			"a smaller size; only the root filesystem (disk=rootfs), never a mount point",
 		Precondition: "digest", Measures: []protocol.Measure{{Param: "size", Name: protocol.MeasureDiskGiB, Format: protocol.FormatSize}},
 		Values: map[string][]string{"disk": {"rootfs"}}},
-	"POST /nodes/{node}/lxc/{vmid}/status/start":    {Handler: "vm_start"},
-	"POST /nodes/{node}/lxc/{vmid}/status/shutdown": {Handler: "vm_shutdown"},
+	"POST /nodes/{node}/lxc/{vmid}/status/start": {Handler: "vm_start"},
+	// A clean shutdown only: forceStop=1 (kill what does not stop in time) is never sent. Before
+	// deleting, it waits (timeout) and fails the task when the container does not stop
+	// (PVE/LXC.pm vm_stop: --nokill).
+	"POST /nodes/{node}/lxc/{vmid}/status/shutdown": {Handler: "vm_shutdown", Values: map[string][]string{"forceStop": {"0"}}},
 	"POST /nodes/{node}/lxc/{vmid}/status/stop":     {Handler: "vm_stop"},
 	"POST /nodes/{node}/lxc/{vmid}/status/reboot":   {Handler: "vm_reboot"},
+	// Deleting a container (delete-lxc, explicit, never planned). force (deleting a running
+	// container) is not declared: Proxmox refuses to delete one that runs.
+	"DELETE /nodes/{node}/lxc/{vmid}": {Handler: "destroy_vm", Effect: protocol.EffectLoseData,
+		Why: "deletes a container and its volumes (destroy-unreferenced-disks: also the disks with its VMID that its configuration " +
+			"does not name): their data is lost. purge also takes its VMID out of the cluster's backup jobs (a job that names only " +
+			"it is deleted), replication jobs and HA resources; Proxmox removes its ACLs and firewall rules either way. Proxmox " +
+			"refuses a running, protected or locked container",
+		Values: map[string][]string{"purge": {"1"}, "destroy-unreferenced-disks": {"1"}}},
 }
