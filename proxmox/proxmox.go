@@ -45,7 +45,7 @@ import (
 // Name and Version are the provider's, as its manifest and Pome name them.
 const (
 	Name    = "proxmox"
-	Version = "0.2.2"
+	Version = "0.2.3"
 	// API is the API it talks to (its catalog: pome/catalogs/proxmox.json, "pome:proxmox").
 	API = "proxmox"
 )

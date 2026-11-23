@@ -344,7 +344,7 @@ mamela import terraform --state /tmp/state.json --providers mamela.providers.tom
 宣言の Pome に足します。
 
 ```bash
-emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.2
+emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.3
 ```
 
 Mamela が依存から見つけて、隔離して動かします。プログラムは Pome.lock と sumdb で固定され、`mamela-provider.toml` の sha256 で確かめられます。

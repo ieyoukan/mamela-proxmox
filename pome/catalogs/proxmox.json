@@ -25,6 +25,23 @@
       "effect": "read"
     },
     {
+      "method": "DELETE",
+      "path": "/nodes/{node}/lxc/{vmid}",
+      "effect": "lose-data",
+      "query": [
+        "destroy-unreferenced-disks",
+        "purge"
+      ],
+      "values": {
+        "destroy-unreferenced-disks": [
+          "1"
+        ],
+        "purge": [
+          "1"
+        ]
+      }
+    },
+    {
       "method": "GET",
       "path": "/nodes/{node}/lxc/{vmid}/config",
       "effect": "read"
@@ -93,7 +110,16 @@
     {
       "method": "POST",
       "path": "/nodes/{node}/lxc/{vmid}/status/shutdown",
-      "effect": "restart"
+      "effect": "restart",
+      "form": [
+        "forceStop",
+        "timeout"
+      ],
+      "values": {
+        "forceStop": [
+          "0"
+        ]
+      }
     },
     {
       "method": "POST",
