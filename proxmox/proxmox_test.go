@@ -115,8 +115,8 @@ func TestConformance(t *testing.T) {
 				Explicit: []providertest.Explicit{{Op: proxmox.OpAdopt, Resource: "ProxmoxVM old"}}},
 			// Containers a person made, adopted by their declared VMIDs (no import), then managed as
 			// declared: grown, resized at once, kept running or shut down, restarted and stopped by
-			// hand; a VM beside them is made with a VMID no container has, and someone else's
-			// container is left alone.
+			// hand, and deleted by hand (a stopped one: the delete alone); a VM beside them is made
+			// with a VMID no container has, and someone else's container is left alone.
 			{Name: "containers", Desired: []protocol.Resource{
 				ct("dns", 7000, `"cores":2,"memoryMib":1024,"swapMib":256,"rootfsGib":8,"onboot":true,"power":"running"`),
 				ct("batch", 7001, `"power":"stopped"`),
@@ -128,7 +128,8 @@ func TestConformance(t *testing.T) {
 					f.Put(fakepve.VM{VMID: 105, Name: "someone-else", Node: "pve1", Type: "lxc", Running: true, Memory: 2048, DiskGiB: 8})
 				},
 				Explicit: []providertest.Explicit{{Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC dns"}, {Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC batch"},
-					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC dns"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC dns"}}},
+					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC dns"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC dns"},
+					{Op: proxmox.OpDeleteLXC, Resource: "ProxmoxLXC batch"}}},
 			{Name: "two-vms-static", Desired: []protocol.Resource{
 				vm("a", `"cpu":2,"memoryMiB":2048,"diskGiB":20,"image":"ubuntu-24.04","network":{"mode":"static","address":"192.0.2.40/24","gateway":"192.0.2.1","dns":["192.0.2.1"]}`),
 				vm("b", `"cpu":1,"memoryMiB":1024,"diskGiB":10,"image":"ubuntu-24.04","network":{"mode":"dhcp"}`)}},
@@ -151,7 +152,7 @@ var namedGuardSettings = []byte(strings.TrimSuffix(string(guardSettings), "}") +
 // The provider passes the conformance suite with a named container too (on another node, in no
 // pool, out of the range): declared by its VMID, adopted where it is, managed, restarted and
 // stopped through the host and the catalog the Pome ships, while someone else's container beside
-// it is left alone. The guard around the converge finds nothing to block: the token holds exactly
+// it is left alone. A running container in the pool is deleted by hand (shut down, then deleted). The guard around the converge finds nothing to block: the token holds exactly
 // the grants (the named one's on /vms/150 only), and the named container is where it is named.
 // (The suite's guard sees no changes; named_test.go checks the changes against the boundary.)
 func TestConformanceNamed(t *testing.T) {
@@ -195,7 +196,8 @@ func TestConformanceNamed(t *testing.T) {
 					f.Put(handmadeCT(7000, "dns", true))
 				},
 				Explicit: []providertest.Explicit{{Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC far"}, {Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC dns"},
-					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC far"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC far"}}},
+					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC far"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC far"},
+					{Op: proxmox.OpDeleteLXC, Resource: "ProxmoxLXC dns"}}},
 		},
 	})
 }

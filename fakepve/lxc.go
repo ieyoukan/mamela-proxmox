@@ -9,8 +9,10 @@ import (
 
 // containers adds the container (lxc) calls: their configuration (with its digest, the description
 // as Proxmox gives it back: decoded, ending in a newline), the root filesystem's growth, their
-// status and power. A container is refused what a real one refuses: a smaller root filesystem, a
-// mount point, starting one that runs, stopping one that does not.
+// status and power, and deleting them. A container is refused what a real one refuses: a smaller
+// root filesystem, a mount point, starting one that runs, stopping one that does not, deleting one
+// that runs or is protected or locked. A shutdown that is not forced, of a container that does not
+// stop (Stubborn), ends its task with an error, and the container keeps running.
 func (s *Server) containers(mux *http.ServeMux, changed changedFunc) {
 	ct := func(w http.ResponseWriter, r *http.Request) *VM {
 		id, _ := strconv.ParseInt(r.PathValue("vmid"), 10, 64)
@@ -40,6 +42,12 @@ func (s *Server) containers(mux *http.ServeMux, changed changedFunc) {
 		}
 		if v.Template {
 			cfg["template"] = 1
+		}
+		if v.Protection {
+			cfg["protection"] = 1
+		}
+		if v.Lock != "" {
+			cfg["lock"] = v.Lock
 		}
 		reply(w, 200, cfg)
 	})
@@ -146,9 +154,65 @@ func (s *Server) containers(mux *http.ServeMux, changed changedFunc) {
 		})
 	}
 	power("start", false, func(v *VM) { v.Running, v.Uptime = true, 0 })
-	power("shutdown", true, func(v *VM) { v.Running = false })
 	power("stop", true, func(v *VM) { v.Running = false })
 	power("reboot", true, func(v *VM) { v.Uptime = 5 })
+	// A shutdown (lxc-stop, waiting timeout seconds, 60 when not given): a stubborn container does
+	// not stop, and unless forceStop is 1 its task fails and it keeps running.
+	mux.HandleFunc("POST /nodes/{node}/lxc/{vmid}/status/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		v := ct(w, r)
+		if v == nil {
+			return
+		}
+		r.ParseForm()
+		for k := range r.PostForm {
+			if k != "timeout" && k != "forceStop" {
+				reply(w, 400, "the fake does not take parameter "+k)
+				return
+			}
+		}
+		switch {
+		case v.Template:
+			reply(w, 500, "you can't start a CT if it's a template")
+			return
+		case !v.Running:
+			reply(w, 500, fmt.Sprintf("CT %d not running", v.VMID))
+			return
+		}
+		id := upid(v.Node, "vzshutdown", v.VMID)
+		switch {
+		case v.Stubborn && r.PostForm.Get("forceStop") != "1":
+			s.failed[id] = "container did not stop"
+		default:
+			delete(s.failed, id) // the fake's UPIDs repeat
+			v.Running = false
+		}
+		reply(w, 200, id)
+	})
+	// Deleting reads its parameters from the query (a DELETE), refuses a running, protected or
+	// locked container (before any task, as Proxmox does), and expects purge and
+	// destroy-unreferenced-disks (what the provider sends).
+	mux.HandleFunc("DELETE /nodes/{node}/lxc/{vmid}", func(w http.ResponseWriter, r *http.Request) {
+		v := ct(w, r)
+		if v == nil {
+			return
+		}
+		q := r.URL.Query()
+		switch {
+		case r.ContentLength > 0:
+			reply(w, 400, "a DELETE's parameters are in the query")
+		case q.Get("purge") != "1" || q.Get("destroy-unreferenced-disks") != "1" || q.Has("force") || len(q) != 2:
+			reply(w, 400, "purge=1 and destroy-unreferenced-disks=1 (only) are expected in the query")
+		case v.Protection:
+			reply(w, 500, fmt.Sprintf("can't remove CT %d - protection mode enabled", v.VMID))
+		case v.Lock != "":
+			reply(w, 500, fmt.Sprintf("CT is locked (%s)", v.Lock))
+		case v.Running:
+			reply(w, 500, fmt.Sprintf("unable to destroy CT %d - container is running", v.VMID))
+		default:
+			delete(s.vms, v.VMID)
+			reply(w, 200, upid(v.Node, "vzdestroy", v.VMID))
+		}
+	})
 }
 
 // rootfsOption writes a container's root filesystem as Proxmox does.

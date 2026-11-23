@@ -46,6 +46,12 @@ type VM struct {
 	// DiskStorage (local-lvm when empty), its cores none (all of the node's) when 0.
 	Swap   int64
 	Onboot bool
+	// Protection and Lock (a backup's, ...) are what a container is refused deleting with.
+	// Stubborn is a container that does not shut down: a shutdown's task ends with an error (it was
+	// not forced), and it keeps running.
+	Protection bool
+	Lock       string
+	Stubborn   bool
 }
 
 func (v VM) digest() string {
@@ -58,6 +64,7 @@ type Server struct {
 	mu      sync.Mutex
 	vms     map[int64]*VM
 	volumes map[string]string // volid -> content
+	failed  map[string]string // the tasks that ended with an error: UPID -> exit status
 	// Uploads counts the uploads it received.
 	Uploads int
 	// Node is the node of the fake cluster ("pve1"), with every other node a guest is on (all
@@ -86,7 +93,7 @@ func (s *Server) nodes() []string {
 // New returns a fake with no VMs and empty storages, on node pve1 with 64 GiB of memory available
 // and storages of 1 TiB, a tenth used, of which "local" accepts images to import.
 func New() *Server {
-	return &Server{vms: map[int64]*VM{}, volumes: map[string]string{}, Node: "pve1",
+	return &Server{vms: map[int64]*VM{}, volumes: map[string]string{}, failed: map[string]string{}, Node: "pve1",
 		MemAvailable: 64 << 30, DiskTotal: 1 << 40, DiskUsed: 100 << 30, ImportStorages: []string{"local"}}
 }
 
@@ -469,7 +476,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	s.containers(mux, changed)
 	mux.HandleFunc("GET /nodes/{node}/tasks/{upid}/status", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, map[string]string{"status": "stopped", "exitstatus": "OK"})
+		exit, failed := s.failed[r.PathValue("upid")]
+		if !failed {
+			exit = "OK"
+		}
+		reply(w, 200, map[string]string{"status": "stopped", "exitstatus": exit})
 	})
 	mux.ServeHTTP(w, r)
 }
