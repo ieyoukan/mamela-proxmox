@@ -143,6 +143,63 @@ func TestConformance(t *testing.T) {
 	})
 }
 
+// namedGuardSettings are the cases' settings with container 150 on node pve2 named into the
+// boundary (outside the pool and the range), to adopt and change.
+var namedGuardSettings = []byte(strings.TrimSuffix(string(guardSettings), "}") +
+	`,"named":[{"node":"pve2","vmid":150,"type":"lxc","access":"change"}]}`)
+
+// The provider passes the conformance suite with a named container too (on another node, in no
+// pool, out of the range): declared by its VMID, adopted where it is, managed, restarted and
+// stopped through the host and the catalog the Pome ships, while someone else's container beside
+// it is left alone. The guard around the converge finds nothing to block: the token holds exactly
+// the grants (the named one's on /vms/150 only), and the named container is where it is named.
+// (The suite's guard sees no changes; named_test.go checks the changes against the boundary.)
+func TestConformanceNamed(t *testing.T) {
+	s, err := proxmox.ParseGuardSettings(namedGuardSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNamedFake := func() http.Handler {
+		f := fakepve.New()
+		f.Permissions = map[string]map[string]int{}
+		for _, g := range proxmox.Grants(proxmox.New().Manifest(), s) {
+			f.Permissions[g.Path] = map[string]int{}
+			for _, p := range g.Privs {
+				f.Permissions[g.Path][p] = 1
+			}
+		}
+		if len(f.Permissions["/vms/150"]) == 0 {
+			panic("no grant on the named container")
+		}
+		return f
+	}
+	far := ct("far", 150, `"cores":2,"memoryMib":1024,"rootfsGib":8,"onboot":true,"power":"running"`)
+	far.Spec = []byte(strings.Replace(strings.TrimSuffix(string(far.Spec), "}")+`,"named":true}`, `"node":"pve1"`, `"node":"pve2"`, 1))
+	providertest.Run(t, providertest.Suite{
+		Provider:      providertest.BuildWASI(t, "../cmd/proxmox-provider"),
+		Catalog:       providertest.Catalog(t, "../pome/catalogs/proxmox.json"),
+		NewAPI:        newNamedFake,
+		GuardSettings: namedGuardSettings,
+		ScriptCredentials: protocol.ScriptCredentials{TokenID: "mamela@pve!lab", TokenFile: "/token",
+			GuardTokenID: "mamela-audit@pve!audit", GuardTokenFile: "/audit-token"},
+		Cases: []providertest.Case{
+			{Name: "named-container", Desired: []protocol.Resource{far, ct("dns", 7000, `"cores":2`)},
+				World: func(api http.Handler) {
+					f := api.(*fakepve.Server)
+					named := handmadeCT(150, "far", false)
+					named.Node, named.Pool = "pve2", ""
+					f.Put(named)
+					neighbour := handmadeCT(151, "neighbour", true)
+					neighbour.Node, neighbour.Pool = "pve2", ""
+					f.Put(neighbour)
+					f.Put(handmadeCT(7000, "dns", true))
+				},
+				Explicit: []providertest.Explicit{{Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC far"}, {Op: proxmox.OpAdoptLXC, Resource: "ProxmoxLXC dns"},
+					{Op: proxmox.OpRebootLXC, Resource: "ProxmoxLXC far"}, {Op: proxmox.OpStopLXC, Resource: "ProxmoxLXC far"}}},
+		},
+	})
+}
+
 // The program in the Pome is exactly a build of this source (build.sh), and its manifest file
 // names it.
 func TestPomeProgramIsTheBuild(t *testing.T) {

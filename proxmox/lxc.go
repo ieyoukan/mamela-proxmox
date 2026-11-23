@@ -19,8 +19,11 @@ import (
 // adopts it. Mamela never creates a container, and so never deletes one.
 //
 //   - Declaring: the declaration names the container by its VMID, inside the site's boundary
-//     (node, pool, VMID range). Until a person adopts it, observe reports it as one to adopt
-//     (kit.Adopter), and the plan shows what would change (previews) and changes nothing.
+//     (node, pool, VMID range), or, named (Proxmox.named_lxc), an existing container outside the
+//     pool and the range, on its node, that the operator names in the guard's settings too
+//     ([[provider.proxmox.guard.named]]): it is adopted where it is, never moved into the pool.
+//     Until a person adopts it, observe reports it as one to adopt (kit.Adopter), and the plan
+//     shows what would change (previews) and changes nothing.
 //   - Adopting (adopt-lxc, explicit): one change of its configuration, based on the configuration
 //     observed (its digest), appends this provider's marker line to its description and the site's
 //     tag to its tags; what people wrote there stays. Nothing else changes, and it is not
@@ -30,8 +33,9 @@ import (
 //     applies cores, memory and swap to a running container at once, without a restart. The root
 //     filesystem is grown, never shrunk. A container is never moved.
 //   - Ownership: a container is Mamela's when it carries the marker line with its declared name
-//     (List), in a pool; a VM's marker is never taken for a container's, nor a container's for a
-//     VM's. Restarting and stopping it are explicit operations (reboot-lxc, stop-lxc).
+//     (List), in a pool (or, named, where its declaration names it); a VM's marker is never taken
+//     for a container's, nor a container's for a VM's. Restarting and stopping it are explicit
+//     operations (reboot-lxc, stop-lxc).
 //
 // A container is a node: mamelet can run in it later (it is not installed in it by Mamela).
 
@@ -141,14 +145,19 @@ func withTag(tags []string, tag string) []string {
 
 // LXCSpec is a declared container: the site's boundary, the VMID of the container (made by hand)
 // to adopt, and the values Mamela manages. A value that is omitted is not managed: Mamela never
-// changes it, and it makes no difference. Its JSON is what the Pome's Proxmox.lxc writes.
+// changes it, and it makes no difference. Its JSON is what the Pome's Proxmox.lxc writes (and
+// Proxmox.named_lxc, with named).
 type LXCSpec struct {
 	Node    string `json:"node" doc:"the Proxmox VE node the container is on"`
-	Pool    string `json:"pool" doc:"the pool Mamela's token may change (the container is in it)"`
+	Pool    string `json:"pool" doc:"the pool Mamela's token may change (the container is in it, unless named)"`
 	Tag     string `json:"tag" doc:"the tag Mamela adds to the container's tags"`
 	VMIDMin int64  `json:"vmidMin" doc:"the first VMID Mamela may use"`
 	VMIDMax int64  `json:"vmidMax" doc:"the last VMID Mamela may use"`
 	VMID    int64  `json:"vmid" doc:"the VMID of the existing container to adopt (made by hand; Mamela creates none)"`
+	// Named: an existing container outside the pool and the VMID range, on Node, that the
+	// operator names in the guard's settings ([[provider.proxmox.guard.named]]); adopted where it
+	// is, never moved into the pool. The guard blocks every change of one the settings do not name.
+	Named bool `json:"named,omitzero" doc:"outside the pool and the VMIDs: a container the guard's settings name ([[provider.proxmox.guard.named]]), adopted where it is"`
 	// The managed values: nil when not managed.
 	Cores     *int64 `json:"cores,omitzero" doc:"its cores (not managed when omitted)"`
 	MemoryMib *int64 `json:"memoryMib,omitzero" doc:"its memory in MiB (not managed when omitted)"`
@@ -168,9 +177,15 @@ func lxcSpec(v jsontext.Value) (LXCSpec, error) {
 		return s, errors.New("node, pool and tag are required")
 	case s.VMIDMin < 100 || s.VMIDMax < s.VMIDMin || s.VMIDMax > 999999999:
 		return s, fmt.Errorf("VMID range %d..%d is not a Proxmox VMID range", s.VMIDMin, s.VMIDMax)
-	case s.VMID < s.VMIDMin || s.VMID > s.VMIDMax:
+	case s.Named && s.inRange(s.VMID):
+		return s, fmt.Errorf("vmid %d is in the declared VMIDs %d..%d: a container there is inside the boundary by its pool; declare it "+
+			"with Proxmox.lxc (in pool %s), not named", s.VMID, s.VMIDMin, s.VMIDMax, s.Pool)
+	case s.Named && (s.VMID < 100 || s.VMID > 999999999):
+		return s, fmt.Errorf("vmid %d is not a Proxmox VMID", s.VMID)
+	case !s.Named && !s.inRange(s.VMID):
 		return s, fmt.Errorf("vmid %d is outside the declared VMIDs %d..%d: Mamela adopts only a container inside its boundary "+
-			"(a VMID cannot be changed in place: restore a backup of the container to a free VMID of the range, in pool %s, and declare that)",
+			"(a VMID cannot be changed in place: restore a backup of the container to a free VMID of the range, in pool %s, and declare that; "+
+			"or, to adopt it where it is, name it in [provider.proxmox.guard] ([[provider.proxmox.guard.named]]) and declare it with Proxmox.named_lxc)",
 			s.VMID, s.VMIDMin, s.VMIDMax, s.Pool)
 	case s.Cores != nil && *s.Cores < 1:
 		return s, errors.New("cores must be 1 or more")
@@ -187,6 +202,24 @@ func lxcSpec(v jsontext.Value) (LXCSpec, error) {
 }
 
 func (s LXCSpec) inRange(vmid int64) bool { return vmid >= s.VMIDMin && vmid <= s.VMIDMax }
+
+// misplaced says how a container (its observed IDs, the pool it is in) is not where its declaration
+// puts it ("" when it is), apart from its VMID: on the node, in the pool and in the range; or,
+// named, on the node and out of the pool (where the pool's grants would reach it beyond what its
+// name gives).
+func (s LXCSpec) misplaced(id map[string]string, observedPool string) string {
+	if !s.Named {
+		return movedFrom(s.Node, s.Pool, s.VMIDMin, s.VMIDMax, id, observedPool)
+	}
+	var out []string
+	if id["node"] != s.Node {
+		out = append(out, fmt.Sprintf("it is on node %s, named on %s", id["node"], s.Node))
+	}
+	if observedPool == s.Pool {
+		out = append(out, fmt.Sprintf("it is in pool %s with a VMID outside %d..%d: a named container stays out of the pool", s.Pool, s.VMIDMin, s.VMIDMax))
+	}
+	return strings.Join(out, "; ")
+}
 
 // LXCState is what is observed of a container.
 type LXCState struct {
@@ -259,7 +292,8 @@ func (*lxcKind) Reads() []protocol.Call      { return lxcReads }
 
 func (*lxcKind) Doc() string {
 	return "A container (LXC) on Proxmox VE that a person made, which Mamela manages once adopted (adopt-lxc): only the values\n" +
-		"declared; an omitted value is never changed. Mamela never creates, moves or deletes a container, and never shrinks its disk."
+		"declared; an omitted value is never changed. Mamela never creates, moves or deletes a container, and never shrinks its disk.\n" +
+		"One outside the pool and the VMIDs is declared named, on its node, and named in the guard's settings too."
 }
 
 func (*lxcKind) Operations() []protocol.Operation {
@@ -278,8 +312,9 @@ func (*lxcKind) Operations() []protocol.Operation {
 	}
 }
 
-// List is every container in a pool that carries this provider's container marker. A template is
-// never one (it is not a container that runs).
+// List is every container in a pool, or named by a declaration of the observation where it is
+// (its node and VMID), that carries this provider's container marker. A template is never one (it
+// is not a container that runs).
 func (k *lxcKind) List(c *kit.Client) ([]kit.Object, error) {
 	rd := k.run.reader(c)
 	cts, err := rd.containers()
@@ -289,7 +324,7 @@ func (k *lxcKind) List(c *kit.Client) ([]kit.Object, error) {
 	var out []kit.Object
 	for _, vmid := range slices.Sorted(maps.Keys(cts)) {
 		g := cts[vmid]
-		if g.Pool == "" || g.Template == 1 {
+		if g.Pool == "" && k.run.named[vmid] != g.Node || g.Template == 1 {
 			continue
 		}
 		cfg, err := rd.ct(g.Node, vmid)
@@ -353,7 +388,8 @@ func (k *lxcKind) Find(c *kit.Client, id map[string]string) (*kit.Object, error)
 
 // claim makes what kit observed of a container what Mamela is told: a node with its state, owned
 // with its marker (tagged or not: a missing tag is put back), or adoptable only inside the
-// declared boundary (node, pool, VMID range, the declared VMID).
+// declared boundary (node, pool, VMID range, the declared VMID; named: node, out of the pool, the
+// declared VMID).
 func (k *lxcKind) claim(o *protocol.Observed, r *protocol.Resource) error {
 	if !o.Exists {
 		return nil
@@ -376,7 +412,7 @@ func (k *lxcKind) claim(o *protocol.Observed, r *protocol.Resource) error {
 		switch {
 		case o.Adoptable:
 			o.Node = nil
-			if o.IDs["node"] != s.Node || st.Pool != s.Pool || !s.inRange(vmid) || vmid != s.VMID || anyMark(st.Description) {
+			if s.misplaced(o.IDs, st.Pool) != "" || vmid != s.VMID || anyMark(st.Description) {
 				// Outside the declared boundary: never Mamela's to take over.
 				o.Adoptable, st.Description = false, ""
 			}
@@ -403,10 +439,19 @@ func (k *lxcKind) Missing(c *kit.Client, r protocol.Resource) (any, error) {
 	g, ok := gs[s.VMID]
 	why := ""
 	switch {
+	case !ok && s.Named:
+		why = fmt.Sprintf("no container has VMID %d among the guests Mamela's token sees: a named container is seen once [provider.proxmox.guard] "+
+			"names it ([[provider.proxmox.guard.named]]: node %q, vmid %d, type \"lxc\") and the bootstrap script has run again (it grants "+
+			"VM.Audit on /vms/%d)", s.VMID, s.Node, s.VMID, s.VMID)
 	case !ok:
 		why = fmt.Sprintf("no container has VMID %d (among the guests Mamela's token sees: those of pool %s)", s.VMID, s.Pool)
+	case g.Type != "lxc" && s.Named:
+		why = fmt.Sprintf("VMID %d is a VM (qemu), not a container: a VM cannot be named and adopted by its VMID (yet); remove the declaration", s.VMID)
 	case g.Type != "lxc":
 		why = fmt.Sprintf("VMID %d is a VM (qemu), not a container: declare it as a ProxmoxVM", s.VMID)
+	case g.Node != s.Node && s.Named:
+		why = fmt.Sprintf("container %d is on node %s, and the declaration names it on %s (was it migrated?): declare and name it where it is, "+
+			"in the declaration and in [provider.proxmox.guard] (Mamela never moves a container)", s.VMID, g.Node, s.Node)
 	case g.Node != s.Node:
 		why = fmt.Sprintf("container %d is on node %s, and the declaration puts it on %s: declare it where it is (Mamela never moves a container)",
 			s.VMID, g.Node, s.Node)
@@ -488,7 +533,7 @@ func lxcChanges(r protocol.Resource, s LXCSpec, o protocol.Observed, st LXCState
 	unsupported := func(op protocol.Op, why string) {
 		out = append(out, protocol.Change{Resource: r.ID, Kind: KindLXC, Op: op, IDs: id, Reasons: []string{why}})
 	}
-	moved := movedFrom(s.Node, s.Pool, s.VMIDMin, s.VMIDMax, id, st.Pool)
+	moved := s.misplaced(id, st.Pool)
 	if want := strconv.FormatInt(s.VMID, 10); id["vmid"] != want {
 		moved = strings.Join(slices.DeleteFunc([]string{moved, fmt.Sprintf("its VMID %s is not the declared %s", id["vmid"], want)},
 			func(x string) bool { return x == "" }), "; ")
@@ -630,7 +675,7 @@ func prepareAdoptLXC(c protocol.Change, o protocol.Observed, st LXCState, desire
 		return protocol.Change{}, fmt.Errorf("%s: %w", o.ID, err)
 	}
 	var refuse []string
-	if moved := movedFrom(s.Node, s.Pool, s.VMIDMin, s.VMIDMax, o.IDs, st.Pool); moved != "" {
+	if moved := s.misplaced(o.IDs, st.Pool); moved != "" {
 		refuse = append(refuse, moved+" (Mamela takes over only what is inside its boundary)")
 	}
 	if vmid != strconv.FormatInt(s.VMID, 10) {

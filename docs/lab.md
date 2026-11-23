@@ -8,6 +8,7 @@
 
 - 既存のワークロードが動いている Proxmox クラスタの中で、**既存のゲスト（VM / LXC）を一切壊さずに** Mamela で VM を作り、その上を管理する。
 - 人が手で作ったコンテナ（LXC）は、人が引き継いだもの（`adopt-lxc`、§10）だけを管理する。Mamela はコンテナを作らず、消さない。
+- 境界の外（別のノード、pool の外）にある既存のコンテナは、運用者が 1 つずつ名指ししたものだけを、その場所のまま引き継ぐ（§10.1）。範囲や pool は広げない。
 - 境界は宣言と設定で決め、毎回の apply の前後に機械的に確かめる。
 - 実機テストは明示的に opt-in したときだけ動かす（`MAMELA_LAB=1`）。CI の標準ジョブでは動かさない。
 
@@ -15,7 +16,7 @@
 
 | 層 | 仕組み | 何を防ぐか |
 |---|---|---|
-| 1. Proxmox の権限 | Mamela 専用の pool・ユーザー・権限分離した Token。権限は pool と、必要なストレージ・ブリッジにだけ付ける | Mamela が既存ゲストを見る・変える・消すこと自体を API が拒む |
+| 1. Proxmox の権限 | Mamela 専用の pool・ユーザー・権限分離した Token。権限は pool と、必要なストレージ・ブリッジにだけ付ける（名指ししたゲストには、その `/vms/<vmid>` にだけ） | Mamela が既存ゲストを見る・変える・消すこと自体を API が拒む |
 | 2. 所有の確認 | VM の説明（description）のマーカー、タグ、pool、VMID の範囲。さらに Mamela は、自分が作成を記録した VM しか自分のものと認めない（Mamela の ADR 0004） | 権限設定の誤りがあっても、管理外のものは `Foreign` として変えない |
 | 3. guard | apply の前後に、このプロバイダーの guard が読み取りだけで確かめる（§6） | 資源の枯渇による巻き添え、境界の外への変更、管理外ゲストの想定外の変化を止める |
 
@@ -44,12 +45,13 @@
 | ファイル | 中身 | 置き場所 |
 |---|---|---|
 | `mamela.site.toml` | Mamela の site（`mamela-site/v1`）。Control Plane、VM のログインユーザーと SSH 鍵、ネットワークの規則（DHCP、固定アドレスの範囲）、1 台あたりの上限 | gitignore |
-| `mamela.providers.toml` | `[provider.proxmox]`: API の URL、`auth = "proxmox"`、操作用 Token（`token_id`、`token_file`）、`tls_fingerprint`、`catalog = "pome:proxmox"`（この Pome が同梱するカタログ）、guard 用の監査 Token（`guard_token_id`、`guard_token_file`）。`[provider.proxmox.guard]`: 境界と安全の閾値 | gitignore |
+| `mamela.providers.toml` | `[provider.proxmox]`: API の URL、`auth = "proxmox"`、操作用 Token（`token_id`、`token_file`）、`tls_fingerprint`、`catalog = "pome:proxmox"`（この Pome が同梱するカタログ）、guard 用の監査 Token（`guard_token_id`、`guard_token_file`）。`[provider.proxmox.guard]`: 境界と安全の閾値。`[[provider.proxmox.guard.named]]`（任意）: 境界に名指しで足す既存のゲスト（§10.1） | gitignore |
 | 宣言 | `Proxmox.Site`（node、pool、ストレージ、bridge、tag、VMID の範囲）と `Proxmox.vm` | 実アドレスを含むなら gitignore した場所 |
 
 設定の例は [README](../README.md#使い方) にある。
 
 - **宣言の Site と guard の設定は同じ値にする。** guard は、各変更が `[provider.proxmox.guard]` の境界（ノード、VMID の範囲、pool、ストレージ、ブリッジ、タグ）の中にあることを確かめる（PVE-0304）。宣言に何が書かれていても、運用者の境界の外には出ない。
+- **名指ししたコンテナは、宣言と設定の両方に書く。** 宣言（`Proxmox.named_lxc`）だけでは境界に入らない。guard は、設定（`[[provider.proxmox.guard.named]]`）で名指しされていないゲストへの変更を止める（PVE-0304）。
 - **Token の秘密は書かない。** ファイルの場所だけを書く。秘密のファイルは mode 0600 にする（グループや他人が読めるファイルを Mamela は拒む）。
 
 ## 4. 一度だけの準備（人が root で実行）
@@ -68,6 +70,7 @@ less bootstrap.sh                                                 # 一行ずつ
   - イメージ用ストレージの content type に `import` を足す（既存の content type は残す）
   - パスごとのロール（`MamelaLabVM`、`MamelaLabDisk`、`MamelaLabImage`、`MamelaLabNet`）
   - 操作用のユーザーと権限分離した Token（ACL はロールの付くパスだけ）
+  - 名指ししたゲストの ACL（その `/vms/<vmid>` にだけ。設定の `access` の段のロール `MamelaLabNamedObserve` か `MamelaLabNamedChange`。§10.1）
   - 監査用の別ユーザーと Token（組み込みロール `PVEAuditor` を `/` に。guard だけが使う）
 - 消すのは、操作用ユーザーと Token の ACL のうち、もう要らないものだけ。もう一度実行しても同じ状態に収束する。
 
@@ -76,8 +79,8 @@ less bootstrap.sh                                                 # 一行ずつ
 - 権限は手で決めない。各操作に要る権限は、プロバイダーのマニフェスト（needs）にある。bootstrap と guard は、同じマニフェストから付与と検査の内容を導く。
 - 各 API 呼び出しに Proxmox VE 9.2 が確かめる権限は、権限カタログ（`proxmox/permissions.go`）にある。根拠は API スキーマの permissions と、ハンドラの中のチェック（`PVE/API2/Qemu.pm` の `create_vm`・`check_storage_access`・`check_vm_modify_config_perm`・`check_vm_create_serial_perm`、`PVE/Storage.pm` の `check_volume_access`、`PVE/GuestHelpers.pm` の `assert_tag_permissions`）。
 - 試験で、各操作の needs がカタログの権限を満たすことを確かめる。新しい呼び出しは、権限を書かずには足せない。
-- guard は、操作用 Token の実効権限がこの一覧（と、pool に属する範囲内の `/vms/<id>`）を一つでも超えれば PVE-0101 で、足りなければ PVE-0102 で止める。
-- `/`、`/vms`、他の pool、他のノードには何も付けない。
+- guard は、操作用 Token の実効権限がこの一覧（と、pool に属する範囲内の `/vms/<id>`）を一つでも超えれば PVE-0101 で、足りなければ PVE-0102 で止める。名指ししたゲストの `/vms/<vmid>` も、設定の `access` の段とちょうど同じでなければ止める。
+- `/`、`/vms`、他の pool、他のノードには何も付けない。名指ししたゲストには、その `/vms/<vmid>` にだけ付ける。
 
 ## 5. VM の作り方
 
@@ -110,8 +113,8 @@ VM は、次のように作る。
 mamela guard <pome-dir>          # 前の検査だけ（読み取りのみ）。block があれば終了コード 1
 ~~~
 
-- **前:** クォーラム、ノード、操作用 Token の権限、メモリとストレージの余裕、イメージを置けるストレージ、境界（範囲内の他人のゲスト、pool 内の範囲外のゲスト、VM の数）、各変更が境界の中にあること。境界の外のゲストを記録する（baseline）。
-- **後:** 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと。
+- **前:** クォーラム、ノード、操作用 Token の権限、メモリとストレージの余裕（名指ししたゲストの変更は、そのゲストのノードで）、イメージを置けるストレージ、境界（範囲内の他人のゲスト、pool 内の範囲外のゲスト、VM の数、名指ししたゲストが名指しした場所にあること）、各変更が境界の中にあること。境界の外のゲストを記録する（baseline）。
+- **後:** 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと。名指しした場所にある名指ししたゲストは境界の中なので、ここでは確かめない。同じノードの隣のゲストは確かめる。
 - **block があれば:** 前なら何も送らない。後なら apply を失敗として報告する。人が確かめてから次に進む。
 - コードの一覧は [README](../README.md#guard適用の前後の安全確認) にある。
 
@@ -180,7 +183,7 @@ mamela plan <pome-dir>                                                     # 宣
 
 lab のクラスタには、人が大切にしているコンテナもある。そのため、次のことを守る。
 
-- **境界の外は引き継がない:** 引き継げるのは、宣言（と guard の設定）の node・pool・VMID の範囲の中にあり、Mamela の印のないコンテナだけである。pool に入れるのは人がする（Mamela の Token にその権限はない）。範囲の中で pool の外にあるゲストがあると、guard の PVE-0301 がすべての apply を止める。
+- **境界の外は引き継がない:** 引き継げるのは、宣言（と guard の設定）の node・pool・VMID の範囲の中にあり、Mamela の印のないコンテナだけである（§10.1 のとおり名指ししたものを除く）。pool に入れるのは人がする（Mamela の Token にその権限はない）。範囲の中で pool の外にあるゲストがあると、guard の PVE-0301 がすべての apply を止める。
 - **宣言して plan するだけでは何も変わらない:** plan は「引き継ぐ対象」（MAM-PLAN-0114）と、引き継いだら変わることのプレビューを示すだけである。
 - **引き継ぎは 1 つずつ、書き足すだけ:** `adopt-lxc` は、説明の最後にマーカーの行を、タグに guard の `tag` を足す。今ある説明とタグは残る。それ以外は変えず、再起動もしない。観測したときの digest が前提で、その後に誰かがコンテナを変えていれば何も送らない。guard も前後に走る。
 - **書いた値だけを変える:** 宣言に書かない値（コア数、メモリ、スワップ、ルートファイルシステム、起動時の起動、電源）は、引き継いだ後も変えない。ルートファイルシステムは広げるだけで、`disk_storage` にあるものに限る。
@@ -193,6 +196,53 @@ mamela act adopt-lxc "ProxmoxLXC <name>" <pome-dir>                        # 送
 mamela act --confirm <name> adopt-lxc "ProxmoxLXC <name>" <pome-dir>       # 引き継ぐ
 mamela plan <pome-dir>                                                     # 宣言との差を確かめる
 ~~~
+
+### 10.1 境界の外のコンテナを名指しで引き継ぐ
+
+lab のクラスタには、境界の外に、人が大切にしているコンテナもある（別のノードにある、pool に入っていない、VMID が範囲の外）。範囲や pool を広げると、隣の無関係なゲストまで境界に入る。そこで、引き継ぐコンテナだけを、運用者が guard の設定で 1 つずつ名指しする。名指ししたものだけが、名指しした場所にある間だけ境界に入る。
+
+- **名指しは 2 か所に書く:** 設定（`mamela.providers.toml` の `[[provider.proxmox.guard.named]]`: `node`、`vmid`、`type = "lxc"`、`access`）と、宣言（`Proxmox.named_lxc(site, node, ct)`）。宣言だけでは、guard が変更を止める（PVE-0304）。
+- **pool には入れない:** 名指ししたコンテナは、その場所のまま引き継ぐ。Mamela の pool に入っていれば、pool の権限が届いてしまうので、guard の PVE-0302 が止める。VMID の範囲の中のゲストは名指しできない（pool に入れる）。
+- **権限は 2 段階、人が決める:** bootstrap は、名指ししたゲストの `/vms/<vmid>` にだけ ACL を付ける。段は設定の `access` で決める。
+  - 段 1 `access = "observe"`: `VM.Audit` だけ。plan は引き継ぐ対象と、変わること（プレビュー）を示す。引き継ぎも変更も guard が止める。
+  - 段 2 `access = "change"`: 引き継ぎと変更に要る権限も足す（`VM.Config.CPU`・`VM.Config.Disk`・`VM.Config.Memory`・`VM.Config.Options`・`VM.PowerMgmt`）。
+  - guard は、Token の権限が段とちょうど同じことを確かめる（PVE-0101、PVE-0102）。段を戻すか名指しを外して bootstrap を実行し直すと、要らなくなった ACL が外れる。
+- **名指ししたとおりの場所にあること:** guard は、名指ししたゲストが同じ VMID・種類・ノードにあることを確かめる（PVE-0305）。移された（migrate）、別のゲストになった、なくなったゲストは境界の外として扱い、何も変えない。`access = "change"` のままなら、Token がその VMID のものを変えられてしまうので、すべての apply を止める。設定（と宣言）の `node` を直すか、名指しを外して bootstrap を実行し直す。
+- **余裕はそのノードで数える:** 名指ししたコンテナの変更が使うメモリとストレージは、そのコンテナのノードで確かめる（PVE-0201、PVE-0202。閾値は同じ）。そのノードが止まっていれば PVE-0003 で止める。
+- **隣のゲストは今までどおり:** 名指ししていないゲストは、同じノードにあっても `Foreign` で、読むだけである。apply の前後に、変わっていないことを guard が確かめる（PVE-0400〜0405）。
+- **VM はまだ名指しできない:** VM を宣言の VMID で引き継ぐ仕組みがまだないためである（`type = "qemu"` は設定ごと拒む）。
+
+~~~bash
+# 段 1: 見るだけ（設定に access = "observe" で名指しする。宣言は Proxmox.named_lxc）
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh
+less bootstrap.sh                                                     # 手順 5b を確かめてから、ノードで root として実行
+mamela guard <pome-dir>                                               # PVE-0305: 名指ししたとおりの場所にあるか
+mamela plan <pome-dir>                                                # 引き継ぐ対象（MAM-PLAN-0114）と、変わること（プレビュー）
+
+# 段 2: 引き継ぐと人が決めたら（access = "change" に書き換える）
+mamela provider script <pome-dir> proxmox bootstrap > bootstrap.sh
+less bootstrap.sh
+mamela guard <pome-dir>
+mamela act adopt-lxc "ProxmoxLXC <name>" <pome-dir>                   # 送るものを確かめる
+mamela act --confirm <name> adopt-lxc "ProxmoxLXC <name>" <pome-dir>  # 引き継ぐ
+mamela plan <pome-dir>
+~~~
+
+bootstrap が名指ししたゲストに実行するのは、次の行だけである（VMID 150、操作用のユーザー `mamela@pve` と Token `mamela@pve!lab` の例）。
+
+~~~bash
+# 段 1（access = "observe"）: 手順 3 と 5b
+ensure_role MamelaLabNamedObserve "VM.Audit"
+pveum acl modify /vms/150 --users mamela@pve --roles MamelaLabNamedObserve
+pveum acl modify /vms/150 --tokens 'mamela@pve!lab' --roles MamelaLabNamedObserve
+
+# 段 2（access = "change"）: 手順 3 と 5b。段 1 の MamelaLabNamedObserve は手順 6 が外す
+ensure_role MamelaLabNamedChange "VM.Audit,VM.Config.CPU,VM.Config.Disk,VM.Config.Memory,VM.Config.Options,VM.PowerMgmt"
+pveum acl modify /vms/150 --users mamela@pve --roles MamelaLabNamedChange
+pveum acl modify /vms/150 --tokens 'mamela@pve!lab' --roles MamelaLabNamedChange
+~~~
+
+実際の VMID とノードは、公開しない設定と宣言にだけ書く。
 
 ## 11. 後片付け
 

@@ -340,7 +340,8 @@ func runMamela(t *testing.T, args ...string) string {
 }
 
 // A declaration of containers with the Pome's Proxmox.lxc evaluates into their specs: the site's
-// boundary, the VMID, and only the values given; and the generated Proxmox.Kinds writes the same.
+// boundary, the VMID, and only the values given; Proxmox.named_lxc, a named container on its own
+// node; and the generated Proxmox.Kinds writes the same.
 func TestLXCDeclarationEvaluates(t *testing.T) {
 	if os.Getenv("MAMELA_TOOLCHAIN_DIR") == "" {
 		t.Skip("MAMELA_TOOLCHAIN_DIR: the toolchain of Mamela")
@@ -369,6 +370,7 @@ fn main() {
       |> Proxmox.lxc(site, dns)
       |> Proxmox.lxc(site, batch)
       |> Proxmox.lxc(site, Proxmox.lxc_of("bare", 7007))
+      |> Proxmox.named_lxc(site, "pve2", Lxc(cores: Some(2), ..Proxmox.lxc_of("far", 150)))
       |> Kinds.proxmox_lxc(
         ProxmoxLxc(
           name: "typed",
@@ -378,12 +380,31 @@ fn main() {
           vmid_min: 7000,
           vmid_max: 7099,
           vmid: 7008,
+          named: None,
           cores: Some(2),
           memory_mib: None,
           swap_mib: Some(0),
           rootfs_gib: None,
           onboot: None,
           power: Some(Running),
+        ),
+      )
+      |> Kinds.proxmox_lxc(
+        ProxmoxLxc(
+          name: "typed-far",
+          node: "pve3",
+          pool: "mamela",
+          tag: "mamela",
+          vmid_min: 7000,
+          vmid_max: 7099,
+          vmid: 160,
+          named: Some(True),
+          cores: None,
+          memory_mib: None,
+          swap_mib: None,
+          rootfs_gib: None,
+          onboot: None,
+          power: None,
         ),
       )
       |> Mamela.package(Proxmox.lxc_node(dns), "nginx")
@@ -406,10 +427,12 @@ fn main() {
 	}
 	const site = `"node":"pve1","pool":"mamela","tag":"mamela","vmidMin":7000,"vmidMax":7099`
 	want := map[string]string{
-		"dns":   `{` + site + `,"vmid":7005,"memoryMib":1024,"rootfsGib":8,"onboot":true}`,
-		"batch": `{` + site + `,"vmid":7006,"power":"stopped"}`,
-		"bare":  `{` + site + `,"vmid":7007}`,
-		"typed": `{` + site + `,"vmid":7008,"cores":2,"swapMib":0,"power":"running"}`,
+		"dns":       `{` + site + `,"vmid":7005,"memoryMib":1024,"rootfsGib":8,"onboot":true}`,
+		"batch":     `{` + site + `,"vmid":7006,"power":"stopped"}`,
+		"bare":      `{` + site + `,"vmid":7007}`,
+		"typed":     `{` + site + `,"vmid":7008,"cores":2,"swapMib":0,"power":"running"}`,
+		"far":       `{` + strings.Replace(site, `"pve1"`, `"pve2"`, 1) + `,"vmid":150,"cores":2,"named":true}`,
+		"typed-far": `{` + strings.Replace(site, `"pve1"`, `"pve3"`, 1) + `,"vmid":160,"named":true}`,
 	}
 	n := 0
 	for _, r := range g.Resources {

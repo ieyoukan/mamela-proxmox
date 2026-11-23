@@ -20,9 +20,10 @@ import (
 //
 //   - observing: a declared VM's claim depends on its declaration (owned only with the declared
 //     tag; its seeds' storage among its IDs; adoptable only inside the declared pool, node and
-//     VMID range), so does a declared container's (adoptable only inside the declared boundary),
-//     and a VM or a container is a node (kit reports no node): each kind's claim does it, after
-//     kit's observation;
+//     VMID range), so does a declared container's (adoptable only inside the declared boundary;
+//     a named one, in no pool, is even listed only where a declaration names it), and a VM or a
+//     container is a node (kit reports no node): each kind's claim does it, after kit's
+//     observation;
 //   - diffing: a declaration of a VM that exists and is not Mamela's gets no changes (the plan
 //     shows it as someone else's, and denies changing it) instead of failing the whole diff; and
 //     the creates of one diff choose different VMIDs and upload an image once (a diff's choices
@@ -70,6 +71,10 @@ func NewWith(o Options) *Provider {
 // choices.
 type run struct {
 	obs *reader // during an observation
+	// named are, during an observation, the named containers its declarations name (Named): their
+	// node by VMID. A named container is in no pool Mamela's token sees, and is listed by its
+	// marker only where a declaration names it.
+	named map[int64]string
 	// During a diff: the VMIDs earlier creates chose, and the images (node/storage/image) an
 	// earlier create uploads.
 	taken     map[int64]bool
@@ -96,7 +101,16 @@ func (p *Provider) Observe(ctx context.Context, h *sdk.Host, in protocol.Observe
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.run.obs = &reader{cfgs: map[int64]vmConfig{}, cts: map[int64]ctConfig{}}
-	defer func() { p.run.obs = nil }()
+	p.run.named = map[int64]string{}
+	defer func() { p.run.obs, p.run.named = nil, nil }()
+	for _, r := range in.Resources {
+		if r.Kind != KindLXC {
+			continue
+		}
+		if s, err := lxcSpec(r.Spec); err == nil && s.Named {
+			p.run.named[s.VMID] = s.Node
+		}
+	}
 	out, err := p.Provider.Observe(ctx, h, in)
 	if err != nil {
 		return out, err

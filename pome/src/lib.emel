@@ -12,7 +12,9 @@
 ## only by the explicit `delete-template`, once no VM is cloned from it.
 ##
 ## A container (LXC) that a person made can be managed too: declare it by its VMID with
-## `Proxmox.lxc`, and adopt it (`adopt-lxc`). Mamela never creates or deletes a container.
+## `Proxmox.lxc`, and adopt it (`adopt-lxc`). Mamela never creates or deletes a container. One
+## outside the site's pool and VMIDs (on another node, say) is declared with `Proxmox.named_lxc`
+## once the operator names it in the guard's settings.
 ##
 ## The typed declarations of every kind, generated from the provider's manifest, are in
 ## `Proxmox.Kinds` (src/kinds.emel): `mamela import terraform` writes the VMs it imports with them.
@@ -133,8 +135,9 @@ pub enum Power {
   Stopped
 }
 
-## A container (LXC) that exists already on the site's node, made by a person: Mamela adopts it by
-## its `vmid` (inside the site's VMIDs and pool) and then manages only the values that are given
+## A container (LXC) that exists already, made by a person: Mamela adopts it by its `vmid` (on the
+## site's node, inside the site's VMIDs and pool; or named, outside them: see `named_lxc`) and then
+## manages only the values that are given
 ## (`Some`); one that is `None` is never changed. `memory_mib` and `swap_mib` are in MiB,
 ## `rootfs_gib` (its root filesystem) in GiB and only ever grown, `onboot` whether it starts when
 ## the node boots, `power` whether it is kept running or stopped. `lxc_of` makes one that manages
@@ -186,10 +189,32 @@ fn some_int(key: String, v: Option[Int]) -> List[(String, Dynamic)] {
 ## started or shut down as declared. Mamela never creates, moves or deletes a container; restarting
 ## and stopping it are explicit operations (`reboot-lxc`, `stop-lxc`).
 pub fn lxc(graph: Mamela.Graph, site: Site, ct: Lxc) -> Mamela.Graph {
+  declare_lxc(graph, site, site.node, ct, [])
+}
+
+## Declares an existing container outside the site's pool and VMIDs, on `node` (any node of the
+## cluster), that the operator names in the guard's settings too (mamela.providers.toml,
+## `[[provider.proxmox.guard.named]]` with its `node`, `vmid` and `type = "lxc"`): Mamela adopts it
+## where it is, one by one, without widening the site's boundary to its neighbours, and never puts
+## it in the pool. Otherwise it is declared, adopted and managed like `lxc`. Mamela's token sees it
+## only once the bootstrap script grants `VM.Audit` on its `/vms/<vmid>`, and may adopt and change
+## it only once a person sets its `access = "change"` and runs the script again; the guard blocks
+## every change of a container the settings do not name, or name on another node.
+pub fn named_lxc(graph: Mamela.Graph, site: Site, node: String, ct: Lxc) -> Mamela.Graph {
+  declare_lxc(graph, site, node, ct, [("named", Dynamic.Bool(True))])
+}
+
+fn declare_lxc(
+  graph: Mamela.Graph,
+  site: Site,
+  node: String,
+  ct: Lxc,
+  extra: List[(String, Dynamic)],
+) -> Mamela.Graph {
   spec = List.flatten(
     [
       [
-        ("node", Text(site.node)),
+        ("node", Text(node)),
         ("pool", Text(site.pool)),
         ("tag", Text(site.tag)),
         ("vmidMin", int(site.vmid_min)),
@@ -208,6 +233,7 @@ pub fn lxc(graph: Mamela.Graph, site: Site, ct: Lxc) -> Mamela.Graph {
         Some(p) -> [("power", Text(power_text(p)))]
         None    -> []
       },
+      extra,
     ],
   )
   Mamela.provided(graph, PROVIDER, LXC_KIND, ct.name, spec)
