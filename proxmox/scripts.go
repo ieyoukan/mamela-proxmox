@@ -136,7 +136,8 @@ func Permissions(m protocol.Manifest, c ScriptConfig) string {
 	if len(c.Guard.Named) > 0 {
 		fmt.Fprintf(&b, "A named guest's privileges are on its /vms/<vmid> only: with access %q, %s (Mamela sees it and changes nothing);\n"+
 			"with %q, also what adopting and changing it need. A person decides when to give %q: set it in the guest's\n"+
-			"[[provider.proxmox.guard.named]] entry, then run the bootstrap script again.\n", AccessObserve, strings.Join(namedObserve(m), ", "),
+			"[[provider.proxmox.guard.named]] entry, then run the bootstrap script again. A named guest is never deleted by Mamela\n"+
+			"(delete-lxc refuses it, and its grant has no VM.Allocate): a person deletes it by hand.\n", AccessObserve, strings.Join(namedObserve(m), ", "),
 			AccessChange, AccessChange)
 	}
 	return b.String()

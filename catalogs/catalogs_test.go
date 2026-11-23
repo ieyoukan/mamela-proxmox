@@ -224,3 +224,46 @@ func TestAgainstPVESchema(t *testing.T) {
 		t.Error("pome/catalogs/proxmox.json is not what is generated: run ./build.sh")
 	}
 }
+
+// Deleting a container (delete-lxc) is reviewed: it loses data, it sends only purge and
+// destroy-unreferenced-disks (never force, which would delete a running container), with the
+// values reviewed, and the shutdown before it is never forced. The host refuses any other value.
+func TestContainerDeleteIsReviewed(t *testing.T) {
+	c, err := Proxmox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := func(method, path string) protocol.Entry {
+		for _, e := range c.Entries {
+			if e.Method == method && e.Path == path {
+				return e
+			}
+		}
+		t.Fatalf("no entry %s %s", method, path)
+		return protocol.Entry{}
+	}
+	del := entry("DELETE", "/nodes/{node}/lxc/{vmid}")
+	if del.Effect != protocol.EffectLoseData || strings.Join(del.Query, ",") != "destroy-unreferenced-disks,purge" || len(del.Form) > 0 {
+		t.Errorf("%+v", del)
+	}
+	shutdown := entry("POST", "/nodes/{node}/lxc/{vmid}/status/shutdown")
+	if shutdown.Effect != protocol.EffectRestart || strings.Join(shutdown.Form, ",") != "forceStop,timeout" {
+		t.Errorf("%+v", shutdown)
+	}
+	for _, c := range []struct {
+		e      protocol.Entry
+		params map[string][]string
+		ok     bool
+	}{
+		{del, map[string][]string{"purge": {"1"}, "destroy-unreferenced-disks": {"1"}}, true},
+		{del, map[string][]string{"purge": {"0"}, "destroy-unreferenced-disks": {"1"}}, false},
+		{del, map[string][]string{"purge": {"1"}, "destroy-unreferenced-disks": {"0"}}, false},
+		{shutdown, map[string][]string{"timeout": {"120"}, "forceStop": {"0"}}, true},
+		{shutdown, map[string][]string{"timeout": {"120"}, "forceStop": {"1"}}, false},
+		{shutdown, nil, true}, // shutdown-lxc (planned): Proxmox's own clean shutdown
+	} {
+		if err := c.e.CheckLimits(c.params, nil); (err == nil) != c.ok {
+			t.Errorf("%s %s %v: %v", c.e.Method, c.e.Path, c.params, err)
+		}
+	}
+}

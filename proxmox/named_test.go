@@ -124,12 +124,19 @@ func TestNamedPermissions(t *testing.T) {
 		}
 	}
 	// Every privilege a container's call checks on its guest (the permission catalog) is in the
-	// change step (Pool.Audit is the pool's: which pool a guest is in, told only for the pool).
+	// change step (Pool.Audit is the pool's: which pool a guest is in, told only for the pool), but
+	// deleting's: Mamela never deletes a named guest (VM.Allocate is not granted on it).
+	if slices.Contains(change["/vms/150"].Privs, "VM.Allocate") {
+		t.Errorf("a named guest's grant holds VM.Allocate (delete-lxc): %v", change["/vms/150"].Privs)
+	}
 	for _, k := range m.Kinds {
 		if k.Kind != KindLXC {
 			continue
 		}
 		for _, o := range k.Operations {
+			if slices.Contains(neverNamed, o.Op) {
+				continue
+			}
 			for _, c := range o.Calls {
 				ps, _ := PrivilegesOf(c)
 				for _, p := range ps {

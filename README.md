@@ -65,8 +65,9 @@ plan には入らず、人が名前を打ち直したときだけ行う操作で
 | `adopt-lxc` | 人が作ったコンテナを引き継ぐ（説明の最後にこのプロバイダーのマーカーの行を、タグに guard の `tag` を足す。今ある説明とタグは残す） |
 | `reboot-lxc` | コンテナに再起動を頼む |
 | `stop-lxc` | コンテナをすぐに止める（電源を抜くのと同じ）。動かす宣言のコンテナは、次の plan がまた起動する |
+| `delete-lxc` | 引き継いだコンテナを消す。動いていれば先にきれいに止め（強制しない）、止まってから、ボリュームごと消す（データを失う）。名指ししたコンテナは消さない（下の「[引き継いだコンテナを消す](#引き継いだコンテナを消すdelete-lxc)」） |
 
-送る直前に、VMID の VM（コンテナ）がまだその名前のマーカーを持つことを確かめます。引き継ぎでは、印がまだなく、設定の digest が観測したときのままであることを確かめます。違えば何も送りません。
+送る直前に、VMID の VM（コンテナ）がまだその名前のマーカーを持つことを確かめます。引き継ぎとコンテナの削除では、設定の digest が観測したときのままであることも確かめます（引き継ぎでは、印がまだないこと）。違えば何も送りません。
 
 ### guard（適用の前後の安全確認）
 
@@ -78,7 +79,7 @@ Proxmox のクラスタには、Mamela と関係のないゲストが動いて�
 | `PVE-0101`・`0102` | 前 | 操作用の Token の権限が、このプロバイダーに要る権限とちょうど同じこと（多すぎも少なすぎも止める） |
 | `PVE-0201`〜`0203` | 前 | 変更の後に残るメモリとストレージの余裕（コンテナのメモリの増加と起動、`disk_storage` にあるルートファイルシステムの拡大も数える。名指ししたゲストの変更は、そのゲストのノードで数える）、イメージを置けるストレージ |
 | `PVE-0301`〜`0303` | 前 | pool と VMID の範囲に他人のゲストがないこと、名指ししたゲストが pool に入っていないこと、ゲストの数（境界の中のコンテナと名指ししたゲストも `max_vms` に数える） |
-| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ、名指ししたゲスト）の中にあること。コンテナの変更は、変えるゲストが pool の中のコンテナ（または名指しした場所にある、名指ししたコンテナ）で、ルートファイルシステムが `disk_storage` にあり、タグを残すこと。名指ししたゲストの変更は、`access = "change"` のときだけ。宣言が何を書いても、ここで止まる |
+| `PVE-0304` | 前 | 各変更が、運用者の決めた境界（ノード、範囲、pool、ストレージ、ブリッジ、タグ、名指ししたゲスト）の中にあること。コンテナの変更は、変えるゲストが pool の中のコンテナ（または名指しした場所にある、名指ししたコンテナ）で、ルートファイルシステムが `disk_storage` にあり、タグを残すこと。名指ししたゲストの変更は、`access = "change"` のときだけ（削除はいつも止める）。宣言が何を書いても、ここで止まる |
 | `PVE-0305` | 前 | 名指ししたゲストが、名指ししたとおりの場所にあること（同じ VMID、種類、ノード）。違えば境界の外として扱い、`access = "change"` なら apply を止める（`observe` なら警告） |
 | `PVE-0400`〜`0405` | 後 | 境界の外のゲストが、消えず、止まらず、設定も変わらず、再起動もしていないこと |
 
@@ -86,7 +87,7 @@ Proxmox のクラスタには、Mamela と関係のないゲストが動いて�
 
 ## コンテナ（LXC）
 
-人が手で作ったコンテナ（Mamela でも Terraform でもなく）を、作り直さずに Mamela で管理できます。Mamela はコンテナを作りません（まだ）。そのため、宣言から外しても消しません。
+人が手で作ったコンテナ（Mamela でも Terraform でもなく）を、作り直さずに Mamela で管理できます。Mamela はコンテナを作りません（まだ）。宣言から外しても消しません（Mamela が作ったものではないため。Mamela の ADR 0013、MAM-PLAN-0308）。消すのは、人が名前を打ち直したとき（明示操作 `delete-lxc`）だけです。
 
 - **宣言:** `Proxmox.lxc(site, ct)` で、今あるコンテナを VMID で名指しします。管理する値は、宣言に書いたもの（`Some`）だけです。書かない値（`None`）は、Mamela が変えることも、差分として示すこともありません。
 - **境界:** 引き継げるのは、宣言の境界（`node`、`pool`、VMID の範囲）の中にあり、Mamela の印のないコンテナだけです。宣言の Site は guard の設定と同じ値にします。境界の外のコンテナは、宣言で VMID を書いても引き継がず、変えません。
@@ -158,9 +159,45 @@ mamela plan <pome-dir>                                                     # 宣
 | `create-lxc` | Mamela はコンテナを作らない。人が作ったものを引き継ぐ |
 
 - **権限:** pool の中のコンテナには、新しい権限は要りません（bootstrap の実行し直しも要りません）。使うのは、VM にもう付いている権限です（名指ししたコンテナの権限は、下の「境界の外のコンテナを名指しで引き継ぐ」）。
-  - pool: `VM.Audit`（読む）、`VM.Config.CPU`・`VM.Config.Memory`・`VM.Config.Options`（`configure-lxc`、`adopt-lxc`）、`VM.Config.Disk`（`grow-lxc-rootfs`）、`VM.PowerMgmt`（起動、停止、再起動）
+  - pool: `VM.Audit`（読む）、`VM.Config.CPU`・`VM.Config.Memory`・`VM.Config.Options`（`configure-lxc`、`adopt-lxc`）、`VM.Config.Disk`（`grow-lxc-rootfs`）、`VM.PowerMgmt`（起動、停止、再起動）、`VM.Allocate`（`delete-lxc`。VM の削除にもう付いている）
   - `disk_storage`: `Datastore.AllocateSpace`（ルートファイルシステムを広げる）。ルートファイルシステムが別のストレージにあるコンテナは広げません（guard の PVE-0304 が止めます。Token にもその権限はありません）。
 - **mamelet:** 引き継いだコンテナは node です（`Proxmox.lxc_node(ct)`）。ただし、Mamela は mamelet を入れません。中のパッケージやサービスを宣言するには、別に mamelet を入れる必要があります。
+
+### 引き継いだコンテナを消す（delete-lxc）
+
+宣言から外しても、引き継いだコンテナは消えません（plan は MAM-PLAN-0308 として残すと示します）。消すときは、人が名前を打ち直して `delete-lxc` を実行します。plan には一度も現れません（ADR 0013 の削除の操作ではありません）。
+
+```sh
+vzdump <vmid> ...                                                          # 要るなら、先にバックアップを取る（Mamela は取らない）
+mamela guard <pome-dir>                                                    # まず境界を確かめる
+mamela act delete-lxc "ProxmoxLXC <name>" <pome-dir>                       # 送るものと、その効果を確かめる（何も変えない）
+mamela act --confirm <name> delete-lxc "ProxmoxLXC <name>" <pome-dir>      # 消す
+```
+
+宣言から外したあとでも、宣言に残したままでも実行できます（宣言に残したままなら、消したあとの plan は `create-lxc`（Mamela はしない）を示すので、宣言も消します）。
+
+- **送るもの（`--confirm` なしで表示されます）:**
+  1. 動いていれば `POST /nodes/{node}/lxc/{vmid}/status/shutdown`（`timeout=120`、`forceStop=0`）。中のプロセスに止まるよう頼み、120 秒まで待ちます。**強制はしません。** 止まらなければ、そこで失敗し、何も消しません（コンテナはそのまま残ります。理由を確かめ、消してよければ `stop-lxc` で止めてから、もう一度 `delete-lxc`）。
+  2. `DELETE /nodes/{node}/lxc/{vmid}`（`purge=1`、`destroy-unreferenced-disks=1`）。コンテナと、そのボリューム（ルートファイルシステム、マウントポイント、設定にないがその VMID を持つディスク）を消します。データは失われます。
+  - **効果（host のカタログ）:** `restart`（止める）と `lose-data`（消す）。カタログは `forceStop=1` と、動いているコンテナを消す `force` を許しません。
+- **`purge` がすること:** Proxmox は、その VMID を、クラスタのバックアップのジョブ、レプリケーションのジョブ、HA のリソースからも外します。**その VMID だけを挙げていたバックアップのジョブは、ジョブごと消えます**（ジョブが「すべて」なら、除外の一覧から外れるだけです）。その VMID の ACL とファイアウォールの設定は、`purge` がなくても消えます。表示にもそう書きます。VM の削除（`delete-vm`）と違って `purge` を使うのは、人が作ったコンテナは人がジョブや HA に入れていることが多く、`purge` がないと、Proxmox が削除を拒む（HA、レプリケーション。止めたあとで）か、消えた VMID がバックアップのジョブに残るためです。
+- **前提条件:** 送る直前（止める前と、消す前）に毎回、その VMID が、観測したときのコンテナのままであることを確かめます。node の上のコンテナで、テンプレートでなく、pool に入っていて、この名前のマーカーを持ち、設定の digest が観測したときのものであること。違えば何も（それ以上）送りません。
+- **中断と再試行:** Mamela は送る前に操作を記録します。応答が失われたら、表示される `--recover` で、送り直さずに確かめます。止めたところで中断した（止まったまま残っている）なら、もう一度 `--confirm` で実行すると、消すことだけを送ります。コンテナがもうなければ、消し終わったとみなし、何も送りません。
+- **guard:** 前に、変更が境界（guard の `node`・`pool`・VMID の範囲）の中のコンテナであることを確かめます（PVE-0304）。後に、境界の外のゲストが、消えず、止まらず、変わっていないことを確かめます（PVE-0400〜0405）。
+- **権限:** 新しい権限は要りません（pool の `VM.Allocate` と `VM.PowerMgmt`。VM の削除にもう付いています）。
+
+拒むもの（理由と直し方を示し、何も送りません）:
+
+| 場合 | 直し方 |
+|---|---|
+| 名指ししたコンテナ（`[[provider.proxmox.guard.named]]`、`Proxmox.named_lxc`） | Mamela は消しません（本番のゲストを、運用者が境界に名指しで足したもの）。guard も PVE-0304 で止め、Token にも `VM.Allocate` を付けません。消すなら人が手で: バックアップを取り、宣言と名指しを外して bootstrap を実行し直し、そのノードで `pct shutdown <vmid>`、`pct destroy <vmid>` |
+| Mamela が引き継いでいないもの（マーカーがない、別の名前のマーカー、VM のマーカー、Mamela の記録がない） | 消すなら手で。Mamela のものなら、名前を確かめる |
+| 境界の外（別のノード、pool の外、VMID の範囲の外）。宣言があれば、宣言の境界の外も | 消すなら手で（Mamela はゲストを動かさない） |
+| VM（qemu）の VMID | `delete-lxc` はコンテナだけ。VM は `delete-vm` |
+| 保護されている（`protection`） | 人が保護をかけたもの。消すと決めたら、手で外す（`pct set <vmid> --protection 0`） |
+| ロックされている（バックアップ、スナップショット、移行の最中、またはその中断） | 終わってから、もう一度 |
+| 準備のあとで変わった（digest、マーカー、ノード、pool、テンプレート化） | もう一度観測して、確かめてから実行し直す |
+| observe-only の名前 | Mamela が拒みます（MAM-POL-0312）。消すなら、observe-only から外してから |
 
 ### 境界の外のコンテナを名指しで引き継ぐ
 
@@ -171,6 +208,7 @@ mamela plan <pome-dir>                                                     # 宣
 - **権限はそのゲストの `/vms/<vmid>` にだけ、2 段階で:** bootstrap が、名指ししたゲストの `/vms/<vmid>` にだけ ACL を付けます。`/`、`/vms`、ノード、他の pool には付けません。どの段にするかは、人が設定（`access`）で決めます。
   - **段 1（`access = "observe"`）:** `VM.Audit` だけ。Mamela はコンテナを見て、plan で引き継ぐ対象と変わること（プレビュー）を示します。何も変えません。引き継ぎも guard が止めます（PVE-0304）。
   - **段 2（`access = "change"`）:** さらに、引き継ぎと変更に要る権限（`VM.Config.CPU`・`VM.Config.Disk`・`VM.Config.Memory`・`VM.Config.Options`・`VM.PowerMgmt`）。どれも、コンテナの操作（`adopt-lxc`、`configure-lxc`、`grow-lxc-rootfs`、`start-lxc`、`shutdown-lxc`、`reboot-lxc`、`stop-lxc`）がそのゲストに要るものです（マニフェストから導く）。
+- **消さない:** 名指ししたコンテナは、Mamela は消しません。`delete-lxc` は拒み、guard も止めます（PVE-0304）。段 2 でも、Token に削除の権限（`VM.Allocate`）は付けません。消すときは、人が手で消します（上の「[引き継いだコンテナを消す](#引き継いだコンテナを消すdelete-lxc)」）。
 - **まだしないこと:** VM（qemu）は名指しできません。VM を宣言の VMID で引き継ぐ仕組みがまだないためです（`type = "qemu"` の設定は、理由を示して拒みます）。
 
 設定（`mamela.providers.toml`。値は例です）:
@@ -250,6 +288,7 @@ guard と plan が拒むもの（何も送りません）:
 | 名指しした VMID が VMID の範囲の中 | 設定を拒む | pool に入れて `Proxmox.lxc` で宣言する |
 | `type = "qemu"` | 設定を拒む（まだ対応していない） | 名指しを外す |
 | 名指ししたコンテナのノードのメモリ・ストレージに余裕がない | そのノードで PVE-0201・0202 が止める | 余裕を作るか、宣言を小さくする |
+| 名指ししたコンテナを `delete-lxc` で消す | 拒む。guard も PVE-0304 で止め、Token に `VM.Allocate` もない | 人が手で消す（バックアップ、宣言と名指しを外して bootstrap、`pct destroy <vmid>`） |
 
 `mamela provider script <pome-dir> proxmox permissions` は、名指ししたゲストの権限と、それが要る操作も示します。
 
@@ -305,7 +344,7 @@ mamela import terraform --state /tmp/state.json --providers mamela.providers.tom
 宣言の Pome に足します。
 
 ```bash
-emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.2
+emela pome add github.com/ieyoukan/mamela-proxmox/pome@v0.2.3
 ```
 
 Mamela が依存から見つけて、隔離して動かします。プログラムは Pome.lock と sumdb で固定され、`mamela-provider.toml` の sha256 で確かめられます。
@@ -414,6 +453,7 @@ go test ./...    # 適合試験（偽の Proxmox で）、guard、取り込み�
   - Terraform で作った VM を取り込み、引き継ぐと差分がなくなること（`fakepve/terraform.go`）
   - `mamela import terraform` の通し（state の JSON から Emela を書き、宣言として評価できること）
   - 人が作ったコンテナを、宣言した VMID で引き継ぎ（引き継ぐ前はプレビューだけ）、宣言のとおりに変えること。中断と再試行、境界の外・別の宣言のもの・VM の VMID・digest の変化・縮小・移動を拒むこと（`fakepve/lxc.go`）
+  - 引き継いだコンテナを消すこと（動いていれば止めてから。止まらなければ消さない）。中断と再試行（なくなっていれば済み）、名指ししたもの・マーカーのないもの・別の名前のもの・境界の外・VM の VMID・保護・ロック・digest の変化を拒むこと、guard の前後（`proxmox/delete_lxc_test.go`）
   - 名指ししたコンテナ（別のノード、pool の外）を、その場所のまま引き継いで変えること。名指ししていないもの・`observe` の段・移されたもの・種類の違うものを拒み、guard の後の検査が隣のゲストの変化を見つけること。bootstrap の出力（`proxmox/testdata`、`go test ./proxmox -run TestNamedScripts -update` で書き直す）
 - **観測の互換性:** 稼働中の Control Plane の記録は、観測した IDs で VM を保証します。`TestObservedIDsKeepTheirShape` が、IDs の形（宣言した VM は node・vmid・storage、それ以外は node・vmid）を固定します。コンテナの IDs（node・vmid。引き継ぐ前も後も同じ）は `TestLXCObservedIDsKeepTheirShape` が固定します。
 - **公開の方法:** このリポジトリのタグ（`pome/vX.Y.Z`）を push します。Pome の公開は取り消せません。プログラムを変えたら `version` を上げ、`./build.sh` で作り直してからタグを付けます。

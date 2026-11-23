@@ -16,7 +16,9 @@ import (
 )
 
 // A container (LXC) on Proxmox VE that a person made by hand, which Mamela manages once a person
-// adopts it. Mamela never creates a container, and so never deletes one.
+// adopts it. Mamela never creates a container, and never deletes one by itself: not when its
+// declaration is removed (it is not Mamela's making: ADR 0013 of Mamela), only when a person asks
+// for it by name (delete-lxc).
 //
 //   - Declaring: the declaration names the container by its VMID, inside the site's boundary
 //     (node, pool, VMID range), or, named (Proxmox.named_lxc), an existing container outside the
@@ -36,6 +38,11 @@ import (
 //     (List), in a pool (or, named, where its declaration names it); a VM's marker is never taken
 //     for a container's, nor a container's for a VM's. Restarting and stopping it are explicit
 //     operations (reboot-lxc, stop-lxc).
+//   - Deleting (delete-lxc, explicit, never planned): only a container Mamela adopted, inside the
+//     boundary proper (in the pool, on the node, in the VMID range), exactly as it was observed (its
+//     marker, its configuration's digest). It is shut down cleanly first (never forced: one that
+//     does not stop is left as it is), then deleted with its volumes. A named container (a
+//     production guest outside the pool) is never deleted by Mamela: a person deletes it by hand.
 //
 // A container is a node: mamelet can run in it later (it is not installed in it by Mamela).
 
@@ -58,6 +65,9 @@ const (
 	OpAdoptLXC  protocol.Op = "adopt-lxc"  // write this provider's marker line and the site's tag, nothing else
 	OpRebootLXC protocol.Op = "reboot-lxc" // ask it to restart
 	OpStopLXC   protocol.Op = "stop-lxc"   // stop it at once
+	// Never planned, not even when its declaration is removed (it is not a removing operation, ADR
+	// 0013 of Mamela): shut it down cleanly, then delete it and its volumes.
+	OpDeleteLXC protocol.Op = "delete-lxc"
 )
 
 // Calls of containers.
@@ -71,7 +81,17 @@ var (
 	shutdownLXC  = protocol.Call{Method: "POST", Path: "/nodes/{node}/lxc/{vmid}/status/shutdown"}
 	rebootLXC    = protocol.Call{Method: "POST", Path: "/nodes/{node}/lxc/{vmid}/status/reboot"}
 	stopLXC      = protocol.Call{Method: "POST", Path: "/nodes/{node}/lxc/{vmid}/status/stop"}
+	// Deleting: a clean shutdown that waits (timeout) and is never forced (forceStop=0: one that
+	// does not stop fails the task, and it is left as it is), then the delete, with its volumes
+	// (destroy-unreferenced-disks) and out of the cluster's jobs (purge). Never force, which would
+	// delete a running container.
+	shutdownLXCWait = protocol.Call{Method: "POST", Path: shutdownLXC.Path, Form: []string{"timeout", "forceStop"}}
+	deleteLXC       = protocol.Call{Method: "DELETE", Path: "/nodes/{node}/lxc/{vmid}", Query: []string{"purge", "destroy-unreferenced-disks"}}
 )
+
+// deleteShutdownTimeout is how long (seconds) deleting a running container waits for it to shut
+// down cleanly before it gives up (and deletes nothing).
+const deleteShutdownTimeout = 120
 
 // lxcReads are what the kind lists containers with (and waits for tasks with).
 var lxcReads = []protocol.Call{listVMs, getLXCConfig, getTask}
@@ -238,6 +258,10 @@ type LXCState struct {
 	Description string `json:"description,omitempty"`
 	// Missing is, for a declared container that is not there to adopt, what is at its VMID.
 	Missing string `json:"missing,omitempty"`
+	// Protection and Lock are what Proxmox refuses to delete a container with (deleting it checks
+	// them before it shuts it down): its protection, and a lock (a backup, a snapshot, a migration).
+	Protection bool   `json:"protection,omitzero"`
+	Lock       string `json:"lock,omitempty"`
 	// Uptime is what List read, for the observed node; it is not reported in the state.
 	Uptime int64 `json:"uptime,omitzero"`
 }
@@ -248,7 +272,8 @@ type ctConfig struct {
 	Cores, MemoryMiB, SwapMiB     int64
 	Rootfs                        string
 	RootfsGiB                     int64
-	Onboot, Template              bool
+	Onboot, Template, Protection  bool
+	Lock                          string
 	Tags                          []string
 }
 
@@ -272,6 +297,8 @@ func (c *ctConfig) UnmarshalJSON(b []byte) error {
 	c.RootfsGiB = diskBytes(c.Rootfs) >> 30
 	c.Onboot = raw.text("onboot") == "1" || raw.text("onboot") == "true"
 	c.Template = raw.text("template") == "1"
+	c.Protection = raw.text("protection") == "1"
+	c.Lock = raw.text("lock")
 	c.Tags = splitTags(raw.text("tags"))
 	return nil
 }
@@ -292,7 +319,8 @@ func (*lxcKind) Reads() []protocol.Call      { return lxcReads }
 
 func (*lxcKind) Doc() string {
 	return "A container (LXC) on Proxmox VE that a person made, which Mamela manages once adopted (adopt-lxc): only the values\n" +
-		"declared; an omitted value is never changed. Mamela never creates, moves or deletes a container, and never shrinks its disk.\n" +
+		"declared; an omitted value is never changed. Mamela never creates or moves a container, and never shrinks its disk; it\n" +
+		"deletes one only when a person asks (delete-lxc), never for a removed declaration, and never a named one.\n" +
 		"One outside the pool and the VMIDs is declared named, on its node, and named in the guard's settings too."
 }
 
@@ -309,6 +337,9 @@ func (*lxcKind) Operations() []protocol.Operation {
 		kit.ExplicitOp(OpRebootLXC, atPool("VM.PowerMgmt"), rebootLXC),
 		kit.ExplicitOp(OpStopLXC, atPool("VM.PowerMgmt"), stopLXC),
 		kit.AdoptOp(OpAdoptLXC, atPool("VM.Config.Options"), setLXCMarker),
+		// Explicit, not removing (kit.RemoveOp): a container is never deleted because its
+		// declaration is removed. Never on a named container (NamedPrivileges leaves it out).
+		kit.ExplicitOp(OpDeleteLXC, atPool("VM.PowerMgmt", "VM.Allocate"), shutdownLXCWait, deleteLXC),
 	}
 }
 
@@ -341,7 +372,8 @@ func (k *lxcKind) List(c *kit.Client) ([]kit.Object, error) {
 func lxcObject(g resource, cfg ctConfig, name string) kit.Object {
 	running := g.Status == "running"
 	st := LXCState{Cores: cfg.Cores, MemoryMiB: cfg.MemoryMiB, SwapMiB: cfg.SwapMiB, RootfsGiB: cfg.RootfsGiB,
-		RootfsStorage: diskStorage(cfg.Rootfs), Onboot: cfg.Onboot, Running: running, Pool: g.Pool, Tags: cfg.Tags}
+		RootfsStorage: diskStorage(cfg.Rootfs), Onboot: cfg.Onboot, Running: running, Pool: g.Pool, Tags: cfg.Tags,
+		Protection: cfg.Protection, Lock: cfg.Lock}
 	if running {
 		st.Uptime = g.Uptime
 	}
@@ -627,7 +659,8 @@ func lxcChanges(r protocol.Resource, s LXCSpec, o protocol.Observed, st LXCState
 	return out
 }
 
-// Prepare implements kit.Explicit: adopt-lxc, reboot-lxc and stop-lxc, from what was observed.
+// Prepare implements kit.Explicit: adopt-lxc, reboot-lxc, stop-lxc and delete-lxc, from what was
+// observed.
 func (*lxcKind) Prepare(op protocol.Op, o protocol.Observed, desired *protocol.Resource) (protocol.Change, error) {
 	var st LXCState
 	if err := decodeState(o, &st); err != nil {
@@ -638,6 +671,8 @@ func (*lxcKind) Prepare(op protocol.Op, o protocol.Observed, desired *protocol.R
 	switch op {
 	case OpAdoptLXC:
 		return prepareAdoptLXC(c, o, st, desired)
+	case OpDeleteLXC:
+		return prepareDeleteLXC(c, o, st, desired)
 	case OpRebootLXC, OpStopLXC:
 		switch {
 		case !o.Owned:
@@ -657,7 +692,81 @@ func (*lxcKind) Prepare(op protocol.Op, o protocol.Observed, desired *protocol.R
 		}
 		return c, nil
 	}
-	return protocol.Change{}, fmt.Errorf("%s is not an explicit operation of a container (it has %s, %s, %s)", op, OpAdoptLXC, OpRebootLXC, OpStopLXC)
+	return protocol.Change{}, fmt.Errorf("%s is not an explicit operation of a container (it has %s, %s, %s, %s)", op, OpAdoptLXC, OpRebootLXC,
+		OpStopLXC, OpDeleteLXC)
+}
+
+// namedNeverDeleted says why Mamela never deletes a named container, and how a person deletes one.
+func namedNeverDeleted(vmid, name, node string) string {
+	return fmt.Sprintf("container %s (%s) is a named guest: a production guest outside the pool that the operator named into the boundary "+
+		"([[provider.proxmox.guard.named]], Proxmox.named_lxc), and Mamela never deletes one. To delete it, a person does it by hand: back it up "+
+		"(vzdump %s), remove its declaration and its [[provider.proxmox.guard.named]] entry, run the bootstrap script again (it takes the grant "+
+		"on /vms/%s away), then on node %s run pct shutdown %s and pct destroy %s", vmid, name, vmid, vmid, node, vmid, vmid)
+}
+
+// prepareDeleteLXC is the change that deletes a container Mamela adopted: shut it down cleanly if it
+// runs (waiting deleteShutdownTimeout seconds, never forced), then delete it with its volumes, out of
+// the cluster's jobs (purge). It is based on the container observed (its marker and its
+// configuration's digest: Done checks both right before each request), and refused, with nothing
+// sent, for a container Mamela does not have, one outside the boundary proper (in a pool, and, when
+// declared, where its declaration puts it), a named one, and one Proxmox would refuse to delete
+// (protected, locked) once it had been shut down.
+func prepareDeleteLXC(c protocol.Change, o protocol.Observed, st LXCState, desired *protocol.Resource) (protocol.Change, error) {
+	vmid, node := o.IDs["vmid"], o.IDs["node"]
+	if !o.Owned {
+		return protocol.Change{}, fmt.Errorf("%s: container %s is not Mamela's: Mamela deletes only a container it adopted (adopt-lxc: its marker "+
+			"line with this name, and Mamela's record); nothing was done", o.ID, vmid)
+	}
+	var refuse []string
+	if desired != nil {
+		s, err := lxcSpec(desired.Spec)
+		if err != nil {
+			return protocol.Change{}, fmt.Errorf("%s: %w", o.ID, err)
+		}
+		if s.Named {
+			return protocol.Change{}, fmt.Errorf("%s: %s; nothing was done", o.ID, namedNeverDeleted(vmid, o.Name, node))
+		}
+		if moved := s.misplaced(o.IDs, st.Pool); moved != "" {
+			refuse = append(refuse, moved+" (Mamela deletes only what is inside its boundary)")
+		}
+		if vmid != strconv.FormatInt(s.VMID, 10) {
+			refuse = append(refuse, fmt.Sprintf("its VMID is not the declared %d", s.VMID))
+		}
+	}
+	if st.Pool == "" {
+		// Outside every pool: a named container (its declaration removed), never one to delete.
+		refuse = append(refuse, "it is in no pool: Mamela deletes only a container in its pool (a named container, outside the pool, "+
+			"is never deleted by Mamela: a person deletes it by hand, pct destroy "+vmid+" on node "+node+")")
+	}
+	if st.Protection {
+		refuse = append(refuse, "its protection is on (Proxmox refuses to delete it, and a person turned it on so that it is not deleted): "+
+			"if it is to be deleted, a person turns it off first (pct set "+vmid+" --protection 0)")
+	}
+	if st.Lock != "" {
+		refuse = append(refuse, fmt.Sprintf("it is locked (%s: a backup, a snapshot or a migration runs, or one was interrupted): wait until "+
+			"it is unlocked, then prepare again", st.Lock))
+	}
+	if len(refuse) > 0 {
+		return protocol.Change{}, fmt.Errorf("%s: container %s cannot be deleted: %s; nothing was done", o.ID, vmid, strings.Join(refuse, "; "))
+	}
+	c.Precondition = o.Version
+	if st.Running {
+		c.Requests = append(c.Requests, req(shutdownLXCWait, map[string][]string{
+			"timeout": {strconv.Itoa(deleteShutdownTimeout)}, "forceStop": {"0"}}))
+		c.Reasons = append(c.Reasons, fmt.Sprintf("shut container %s (%s) down first: it is asked to stop its processes, and waited for up to %d s; "+
+			"it is never forced: one that does not stop fails the operation, and nothing is deleted (find out why; stop-lxc stops it at once, "+
+			"then delete-lxc again)", vmid, o.Name, deleteShutdownTimeout))
+	}
+	c.Requests = append(c.Requests, req(deleteLXC, map[string][]string{"purge": {"1"}, "destroy-unreferenced-disks": {"1"}}))
+	c.Reasons = append(c.Reasons,
+		fmt.Sprintf("delete container %s (%s) on node %s and its volumes (its root filesystem, its mount points, and every unreferenced "+
+			"disk with VMID %s on the storages): their data is lost, and no backup is made (back it up first: vzdump %s)", vmid, o.Name, node, vmid, vmid),
+		fmt.Sprintf("purge: Proxmox also takes VMID %s out of the cluster's backup jobs (a job that names only this container is deleted), "+
+			"replication jobs and HA resources; its permissions and firewall rules go with it", vmid),
+		fmt.Sprintf("only this container, as observed: right before each request, VMID %s on %s must still be a container (not a template) "+
+			"carrying the marker of %s, with the configuration digest observed (%s); otherwise nothing is sent. A container already gone "+
+			"counts as deleted (a retry sends nothing)", vmid, node, o.Name, o.Version))
+	return c, nil
 }
 
 // prepareAdoptLXC is the change that takes over a container: append this provider's marker line to
@@ -732,6 +841,9 @@ func mine(ch protocol.Change, cfg ctConfig) bool {
 // it makes sure the VMID is still the container the change was made for: the one to adopt (no
 // mark of Mamela's, the configuration observed), or the one that carries its marker.
 func (*lxcKind) Done(c *kit.Client, ch protocol.Change, a protocol.Approved) (bool, error) {
+	if ch.Op == OpDeleteLXC {
+		return deleteDone(c, ch, a)
+	}
 	g, cfg, found, err := container(c, ch)
 	switch {
 	case err != nil:
@@ -757,6 +869,60 @@ func (*lxcKind) Done(c *kit.Client, ch protocol.Change, a protocol.Approved) (bo
 		return false, fmt.Errorf("container %s is not %s's any more (its marker differs); nothing was done, observe and plan again", vmid, nameOf(ch.Resource))
 	}
 	return inEffect(g, cfg, a), nil
+}
+
+// deleteDone is Done for delete-lxc. A VMID no guest has any more is the container deleted (by an
+// earlier apply whose answer was lost, or by hand): both requests are done, and nothing is sent.
+// Otherwise the container must still be exactly the one observed, right before each request: a
+// container (not a template) on the change's node, in a pool, carrying the marker of the change's
+// resource, with the configuration's digest the change was prepared on, and neither protected nor
+// locked (Proxmox would refuse to delete it, after it was shut down). Anything else fails with
+// nothing sent.
+func deleteDone(c *kit.Client, ch protocol.Change, a protocol.Approved) (bool, error) {
+	node, vmid, err := target(ch)
+	if err != nil {
+		return false, err
+	}
+	gs, err := guests(c)
+	if err != nil {
+		return false, err
+	}
+	g, ok := gs[vmid]
+	if !ok {
+		return true, nil // gone: deleted
+	}
+	name := nameOf(ch.Resource)
+	// Whatever fails here, the container is there: it was not deleted, and nothing more is sent.
+	const kept = "it was not deleted, and nothing more was sent"
+	switch {
+	case g.Type != "lxc":
+		return false, fmt.Errorf("VMID %d is a VM (qemu) now, not container %s: %s", vmid, name, kept)
+	case g.Node != node:
+		return false, fmt.Errorf("container %d is on node %s now, not %s (was it migrated?): %s; observe and prepare again", vmid, g.Node, node, kept)
+	case g.Pool == "":
+		return false, fmt.Errorf("container %d is in no pool now (Mamela deletes only a container in its pool): %s", vmid, kept)
+	}
+	cfg, err := containerConfig(c, node, vmid)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case !mine(ch, cfg):
+		return false, fmt.Errorf("container %d is not %s's any more (its marker differs or is gone): %s; observe and prepare again", vmid, name, kept)
+	case cfg.Template || g.Template == 1:
+		return false, fmt.Errorf("container %d is a template now: %s", vmid, kept)
+	case ch.Precondition == "" || cfg.Digest != ch.Precondition:
+		return false, fmt.Errorf("container %d's configuration changed since it was prepared (digest %s, prepared on %s), so it may not be the "+
+			"container that was confirmed: %s; observe and prepare again", vmid, cfg.Digest, ch.Precondition, kept)
+	case cfg.Protection:
+		return false, fmt.Errorf("container %d is protected now (Proxmox refuses to delete it): %s", vmid, kept)
+	case cfg.Lock != "":
+		return false, fmt.Errorf("container %d is locked now (%s): %s; try again once it is unlocked", vmid, cfg.Lock, kept)
+	}
+	if a.Path == shutdownLXCWait.Path {
+		return g.Status != "running", nil
+	}
+	return false, nil
 }
 
 // inEffect says whether a request's effect is there.
@@ -820,6 +986,10 @@ func configHas(cfg ctConfig, params map[string][]string) bool {
 // Lookup implements kit.Looker: how much of a change is in effect, on the container that carries
 // its marker (on any other, nothing is).
 func (*lxcKind) Lookup(c *kit.Client, ch protocol.Change) (protocol.LookupStatus, bool, error) {
+	if ch.Op == OpDeleteLXC {
+		status, err := lookupDelete(c, ch)
+		return status, true, err
+	}
 	g, cfg, found, err := container(c, ch)
 	switch {
 	case err != nil:
@@ -852,4 +1022,35 @@ func (*lxcKind) Lookup(c *kit.Client, ch protocol.Change) (protocol.LookupStatus
 		return protocol.LookupNotDone, true, nil
 	}
 	return protocol.LookupPartly, true, nil
+}
+
+// lookupDelete tells how much of a delete-lxc is in effect: done when no guest has the VMID (or a
+// VM has it now: a VMID is one guest's in the whole cluster); partly when the container that carries
+// the marker was shut down and is still there; not done when it is there, or it was migrated. A
+// container without the marker at the VMID is unknown: the one deleted and another made with its
+// VMID since, or the one confirmed with its marker taken off; a person looks.
+func lookupDelete(c *kit.Client, ch protocol.Change) (protocol.LookupStatus, error) {
+	node, vmid, err := target(ch)
+	if err != nil {
+		return "", err
+	}
+	gs, err := guests(c)
+	if err != nil {
+		return "", err
+	}
+	g, ok := gs[vmid]
+	if !ok || g.Type != "lxc" {
+		return protocol.LookupDone, nil
+	}
+	cfg, err := containerConfig(c, g.Node, vmid)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case !mine(ch, cfg):
+		return protocol.LookupUnknown, nil
+	case g.Node == node && g.Status != "running" && len(ch.Requests) > 1:
+		return protocol.LookupPartly, nil // shut down, not deleted
+	}
+	return protocol.LookupNotDone, nil // there (or migrated: not deleted)
 }
